@@ -3,9 +3,10 @@
 Go reference app for the Nitrolite SDK.
 
 Status:
-- repo bootstrap in progress
-- Phase 1 scaffold started
-- Nitrolite SDK wiring not implemented yet
+- private repo created and linked
+- sdk-backed startup path implemented
+- Phase 1 read-only API slice implemented
+- write-path actions still pending
 
 Local:
 ```bash
@@ -22,4 +23,3 @@ Planned shape:
 - Railway deploy target
 
 See [AGENTS.md](/Users/maharshimishra/Documents/nitrolite/nitrolite-go-example/AGENTS.md) and [.codex/STATE.md](/Users/maharshimishra/Documents/nitrolite/nitrolite-go-example/.codex/STATE.md).
-

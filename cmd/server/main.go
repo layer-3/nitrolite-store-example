@@ -12,6 +12,7 @@ import (
 	"github.com/layer-3/nitrolite-go-example/internal/config"
 	internalhttp "github.com/layer-3/nitrolite-go-example/internal/httpapi"
 	"github.com/layer-3/nitrolite-go-example/internal/nitrolite"
+	"github.com/layer-3/nitrolite-go-example/internal/signing"
 )
 
 func main() {
@@ -25,7 +26,18 @@ func main() {
 	}
 
 	logger := newLogger(cfg.LogLevel)
-	manager := nitrolite.NewManager("")
+	signer, err := signing.NewEnvSigner(cfg.DemoPrivateKey)
+	if err != nil {
+		logger.Error("failed to initialize signer", "error", err)
+		os.Exit(1)
+	}
+
+	manager, err := nitrolite.NewSDKManager(ctx, cfg, signer, logger)
+	if err != nil {
+		logger.Error("failed to initialize nitrolite manager", "error", err)
+		os.Exit(1)
+	}
+	go manager.Run(ctx)
 
 	handler, err := internalhttp.NewHandler(cfg, manager, logger)
 	if err != nil {
