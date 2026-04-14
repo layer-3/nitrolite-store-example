@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Nitrolite Go Example</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <p class="eyebrow">Nitrolite Go Example</p>
+      <h1>Phase 1 scaffold</h1>
+      <p class="lede">Server and console bootstrap are live. SDK wiring is next.</p>
+    </section>
+
+    <section class="panel">
+      <h2>Status</h2>
+      <dl id="status-grid" class="grid">
+        <div><dt>Clearnode</dt><dd id="clearnode">loading</dd></div>
+        <div><dt>Signer</dt><dd id="signer">loading</dd></div>
+        <div><dt>Ready</dt><dd id="ready">loading</dd></div>
+      </dl>
+    </section>
+
+    <section class="panel">
+      <h2>Wallet</h2>
+      <pre id="wallet">loading</pre>
+    </section>
+
+    <section class="panel">
+      <h2>Notes</h2>
+      <ul class="notes">
+        <li>Nested repo created inside the Nitrolite checkout.</li>
+        <li>Codex checkpoint file lives at <code>.codex/STATE.md</code>.</li>
+        <li>Next step is replacing the placeholder manager with the real SDK lifecycle.</li>
+      </ul>
+    </section>
+  </main>
+
+  <script src="/console.js"></script>
+</body>
+</html>
+
