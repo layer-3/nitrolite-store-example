@@ -1,70 +1,80 @@
 # CODEX STATE
 
-goal: build `nitrolite-go-example` as a nested private repo with a Phase 1 Go service + embedded console
-mode: Phase 1 incremental slices with compact checkpoints after each green test pass
+goal: keep `nitrolite-go-example` as the live Go reference for a backend-owned Nitrolite merchant settlement service with embedded operator UI, hosted pay links, embedded API reference, and advanced protocol console
+mode: incremental slices with compact checkpoints after each green test pass
 outer_repo_rule: never switch branches in `/Users/maharshimishra/Documents/nitrolite`
 nested_repo: `/Users/maharshimishra/Documents/nitrolite/nitrolite-go-example`
 remote_repo: `https://github.com/ihsraham/nitrolite-go-example`
 default_branch: `main`
 
 done:
-- created nested repo dir + git init
-- bootstrap committed and pushed (`457294c`, `Bootstrap scaffold`)
-- private GitHub remote created and linked
-- added repo metadata files and compact agent rules/skills
-- added `.env` loader and runnable server scaffold
-- pinned `github.com/layer-3/nitrolite@v1.2.0`
-- implemented `internal/signing.NewEnvSigner(...)` + signer test
-- replaced placeholder manager init with real SDK-backed init + ping + home-chain binding
-- added Phase 1 read services and handlers:
-  - `/api/v1/node/config`
-  - `/api/v1/node/blockchains`
-  - `/api/v1/node/assets`
-  - `/api/v1/balances`
-  - `/api/v1/transactions`
-  - `/api/v1/channel`
-  - `/api/v1/channel/state`
-- verified compile and smoke tests with `go test ./...`
+- bootstrapped the nested Go example repo and pinned `github.com/layer-3/nitrolite@v1.2.0`
+- implemented signer init, SDK manager lifecycle, reconnect loop, raw read/mutation services, app sessions, and session keys
+- added browser write unlock flow with HttpOnly cookie auth
+- embedded `/reference` and `/advanced` surfaces in the same Go binary
+- added SQLite-backed merchant persistence in `internal/store`
+- added merchant services for payment requests, orders, payouts, operations, and dashboard aggregation
+- added operator lease persistence and middleware tiers:
+  - write access
+  - lease ownership
+  - active operator lease
+- added startup lease clearing to avoid restart-orphaned lease rows
+- added serialized merchant operation runner goroutine
+- added operator dashboard at `/`
+- added hosted sandbox pay page at `/pay/{slug}`
+- rewrote `/openapi.json` around merchant routes while keeping raw protocol routes documented
+- updated route and smoke tests for merchant routes, lease flow, and hosted pay page
+- verified with `env GOCACHE=/tmp/nitrolite-go-example-gocache go test ./...`
 
 current:
-- nested repo has a stable read-only Phase 1 slice
-- write flows are not implemented yet
-- reconnect loop is still minimal: mark disconnected on `WaitCh()` close, no rebuild loop yet
+- same-binary Go server serves four surfaces:
+  - `/` operator dashboard
+  - `/pay/{slug}` hosted sandbox pay page
+  - `/reference` API reference
+  - `/advanced` raw operator console
+- merchant records and operator lease persist in SQLite
+- hosted pay is intentionally a sandbox simulation using the backend signer
+- merchant writes are browser-session-oriented and require operator lease ownership
+- raw protocol routes remain available for debugging
 
 next:
-- add mutation auth middleware using `CONSOLE_API_KEY`
-- implement Phase 1 write services/handlers:
-  - approve
-  - deposit
-  - withdraw
-  - transfer
-  - checkpoint
-- wire console JS to real read endpoints instead of scaffold mode
-- checkpoint and push after the write slice is green
+- run the merchant flow manually in a live browser against the sandbox
+- verify checkpoint and sync behavior on real chain latency
+- add deeper runner tests for waiting-chain / waiting-sync transitions if coverage gaps show up
+- run a UX review against the operator dashboard and hosted pay page
+- checkpoint, commit, and push the merchant-settlement slice
 
 decisions:
-- use `.codex/STATE.md` as canonical compact context file
-- use `.codex/checkpoints/NNNN-*.md` as immutable milestone logs
-- keep repo inside parent checkout for SDK/source proximity
-- keep outer `nitrolite` repo branch untouched; inner repo carries all example history
+- keep backend demo signer as the only Nitrolite signer
+- make `/pay/{slug}` public and wallet-less in v1
+- require operator lease even for `POST /api/v1/payment-requests`
+- clear persisted lease on startup because write sessions are in-memory
+- serialize all merchant SDK writes through one runner goroutine
+- keep `/reference` and `/advanced` instead of deleting raw protocol visibility
+- use SQLite locally and document Railway Volume requirement for durability
 
 risks:
-- manager reconnect contract is incomplete relative to the PRD
-- no handler/service unit tests yet beyond smoke coverage
-- no mutation auth or write-path verification yet
+- hosted pay remains a sandbox simulation, not a real customer payment rail
+- lease heartbeat depends on browser timers and can be affected by background-tab throttling
+- runner receipt polling currently uses direct RPC receipt reads because the SDK transaction list does not expose tx hashes cleanly enough for the runner
+- the app still assumes the configured merchant app exists on the node
 
 files:
-- `cmd/server/main.go`: entrypoint
-- `internal/config/config.go`: env config
-- `internal/signing/signer.go`: env-backed signer abstraction
-- `internal/nitrolite/manager.go`: SDK client lifecycle + health state
-- `internal/service/*`: read-side service layer
-- `internal/httpapi/*`: read handlers + response/query helpers
-- `internal/webui/handler.go`: embedded UI serving
-- `web/*`: UI assets
-- `test/smoke/console_test.go`: route smoke tests with fake Nitrolite client
+- `cmd/server/main.go`: startup ordering, store init, runner wiring
+- `internal/store/`: SQLite schema and merchant persistence
+- `internal/service/merchant.go`: merchant services and dashboard aggregation
+- `internal/service/merchant_runner.go`: serialized async merchant runner
+- `internal/httpapi/merchant.go`: merchant routes and lease routes
+- `internal/httpapi/openapi.go`: merchant-first OpenAPI document
+- `internal/webui/handler.go`: operator/reference/advanced/pay routing
+- `web/index.html`: operator dashboard
+- `web/pay.html`: hosted sandbox pay page
+- `web/merchant.js`: operator dashboard behavior
+- `web/pay.js`: hosted pay page behavior
+- `web/reference.html`: embedded API reference shell
+- `web/advanced.html`: raw operator console
+- `test/smoke/console_test.go`: embedded surface smoke tests
 
 last_verified:
-- `go mod tidy`
-- `gofmt -w cmd/server/main.go internal/nitrolite/manager.go internal/service/*.go internal/httpapi/*.go test/smoke/console_test.go`
-- `go test ./...`
+- `gofmt -w cmd/server/main.go internal/httpapi/auth.go internal/httpapi/merchant.go internal/httpapi/openapi.go internal/httpapi/routes_test.go internal/service/merchant.go internal/store/store.go internal/webui/handler.go test/smoke/console_test.go`
+- `env GOCACHE=/tmp/nitrolite-go-example-gocache go test ./...`

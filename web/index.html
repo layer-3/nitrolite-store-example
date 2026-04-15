@@ -3,42 +3,246 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Nitrolite Go Example</title>
+  <title>Nitrolite Go Example | Merchant Settlement Dashboard</title>
   <link rel="stylesheet" href="/style.css">
 </head>
-<body>
-  <main class="shell">
-    <section class="hero">
+<body class="page page-dashboard">
+  <div class="backdrop"></div>
+  <header class="site-header">
+    <div>
       <p class="eyebrow">Nitrolite Go Example</p>
-      <h1>Phase 1 scaffold</h1>
-      <p class="lede">Server and console bootstrap are live. SDK wiring is next.</p>
+      <h1>Merchant settlement dashboard</h1>
+      <p class="lede">Backend-owned signer, hosted pay links, order reservation, and payout control from the same Go binary.</p>
+    </div>
+    <nav class="site-nav" aria-label="Primary">
+      <a class="nav-link active" href="/">Operator Dashboard</a>
+      <a class="nav-link" href="/reference">API Reference</a>
+      <a class="nav-link" href="/advanced">Advanced</a>
+    </nav>
+    <div class="site-actions">
+      <button type="button" class="ghost-button" data-auth-open>Unlock write actions</button>
+      <button type="button" class="ghost-button" data-auth-lock hidden>Lock</button>
+      <button id="lease-acquire" type="button" class="ghost-button">Acquire operator lease</button>
+      <button id="lease-release" type="button" class="ghost-button" hidden>Release lease</button>
+      <button id="dashboard-refresh" type="button" class="primary-button">Refresh dashboard</button>
+    </div>
+  </header>
+
+  <main class="page-shell">
+    <section class="hero panel">
+      <div>
+        <p class="eyebrow">Sandbox merchant service</p>
+        <h2>Hosted pay links on top of the Go SDK.</h2>
+        <p class="lede">Customers hit a public pay page. The backend signer captures sandbox funds, reserves them in an order workspace, and lets the active operator settle, refund, or pay out the merchant balance.</p>
+      </div>
+      <div class="hero-status">
+        <div class="hero-callout">
+          <span class="label">Write access</span>
+          <strong data-auth-status>Checking unlock status…</strong>
+          <p class="muted">Unlock writes first, then acquire the operator lease to create pay links or queue merchant mutations.</p>
+        </div>
+        <div class="hero-callout">
+          <span class="label">Operator lease</span>
+          <strong id="lease-status-text">Checking lease status…</strong>
+          <p id="lease-status-hint" class="muted">Only one browser can control merchant mutations at a time.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="metrics-grid">
+      <article class="metric-card">
+        <span class="label">Clearnode</span>
+        <strong id="dashboard-health">Loading…</strong>
+      </article>
+      <article class="metric-card">
+        <span class="label">Signer</span>
+        <strong id="dashboard-signer">Loading…</strong>
+      </article>
+      <article class="metric-card">
+        <span class="label">Available balance</span>
+        <strong id="dashboard-available">Loading…</strong>
+      </article>
+      <article class="metric-card">
+        <span class="label">Reserved in orders</span>
+        <strong id="dashboard-reserved">Loading…</strong>
+      </article>
+    </section>
+
+    <section id="dashboard-banner" class="flow-banner">Loading merchant state…</section>
+
+    <section class="overview-grid">
+      <article class="panel">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">Merchant balance</p>
+            <h2>Current channel position</h2>
+          </div>
+        </div>
+        <div id="dashboard-balance-summary" class="summary-stack"></div>
+      </article>
+
+      <article class="panel">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">Home channel</p>
+            <h2>Settlement rail status</h2>
+          </div>
+        </div>
+        <div id="dashboard-channel-summary" class="summary-stack"></div>
+      </article>
+
+      <article class="panel">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">Latest signed state</p>
+            <h2>Current sync edge</h2>
+          </div>
+        </div>
+        <div id="dashboard-state-summary" class="summary-stack"></div>
+      </article>
+
+      <article class="panel">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">Open work</p>
+            <h2>Orders and operations</h2>
+          </div>
+        </div>
+        <div id="dashboard-work-summary" class="summary-stack"></div>
+      </article>
+    </section>
+
+    <section class="dashboard-grid">
+      <article class="panel">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">Payment requests</p>
+            <h2>Create hosted pay link</h2>
+          </div>
+        </div>
+        <form id="payment-request-form" class="modal-form">
+          <label class="field">
+            <span>Title</span>
+            <input name="title" value="Sandbox order" required>
+          </label>
+          <label class="field">
+            <span>Description</span>
+            <textarea name="description">Nitrolite sandbox checkout</textarea>
+          </label>
+          <div class="flow-toolbar">
+            <label class="field">
+              <span>Asset</span>
+              <select id="payment-asset" name="asset"></select>
+            </label>
+            <label class="field">
+              <span>Amount</span>
+              <input name="amount" value="1.00" inputmode="decimal" required>
+            </label>
+          </div>
+          <button type="submit" class="primary-button">Create pay link</button>
+          <p class="step-result" id="payment-request-result">Waiting for input.</p>
+        </form>
+        <div class="section-header compact-header">
+          <div>
+            <p class="eyebrow">Recent links</p>
+            <h2>Hosted requests</h2>
+          </div>
+        </div>
+        <div id="payment-request-list" class="stack-list"></div>
+      </article>
+
+      <article class="panel">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">Orders</p>
+            <h2>Reserved, settled, refunded</h2>
+          </div>
+        </div>
+        <div id="orders-list" class="table-shell"></div>
+      </article>
+    </section>
+
+    <section class="dashboard-grid">
+      <article class="panel">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">Merchant payout</p>
+            <h2>Request payout from channel balance</h2>
+          </div>
+        </div>
+        <form id="payout-form" class="modal-form">
+          <div class="flow-toolbar">
+            <label class="field">
+              <span>Asset</span>
+              <select id="payout-asset" name="asset"></select>
+            </label>
+            <label class="field">
+              <span>Amount</span>
+              <input name="amount" value="0.50" inputmode="decimal" required>
+            </label>
+          </div>
+          <label class="field">
+            <span>Destination wallet</span>
+            <input name="destination_wallet" placeholder="0x..." required>
+          </label>
+          <button type="submit" class="primary-button">Queue payout</button>
+          <p class="step-result" id="payout-result">Waiting for input.</p>
+        </form>
+        <div class="section-header compact-header">
+          <div>
+            <p class="eyebrow">Recent payouts</p>
+            <h2>Status</h2>
+          </div>
+        </div>
+        <div id="payout-list" class="stack-list"></div>
+      </article>
+
+      <article class="panel">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">Operations</p>
+            <h2>Runner timeline</h2>
+          </div>
+        </div>
+        <div id="operations-list" class="stack-list"></div>
+      </article>
     </section>
 
     <section class="panel">
-      <h2>Status</h2>
-      <dl id="status-grid" class="grid">
-        <div><dt>Clearnode</dt><dd id="clearnode">loading</dd></div>
-        <div><dt>Signer</dt><dd id="signer">loading</dd></div>
-        <div><dt>Ready</dt><dd id="ready">loading</dd></div>
-      </dl>
-    </section>
-
-    <section class="panel">
-      <h2>Wallet</h2>
-      <pre id="wallet">loading</pre>
-    </section>
-
-    <section class="panel">
-      <h2>Notes</h2>
-      <ul class="notes">
-        <li>Nested repo created inside the Nitrolite checkout.</li>
-        <li>Codex checkpoint file lives at <code>.codex/STATE.md</code>.</li>
-        <li>Next step is replacing the placeholder manager with the real SDK lifecycle.</li>
-      </ul>
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">Transport view</p>
+          <h2>Browser activity log</h2>
+        </div>
+      </div>
+      <pre id="dashboard-activity-log">No activity yet.</pre>
     </section>
   </main>
 
-  <script src="/console.js"></script>
+  <div id="unlock-modal" class="modal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="unlock-title">
+      <div class="section-header">
+        <div>
+          <p class="eyebrow">Sandbox mutations</p>
+          <h2 id="unlock-title">Unlock write actions</h2>
+        </div>
+      </div>
+      <p class="muted">Unlock once per browser session. The operator lease is separate and prevents a second browser from queueing merchant work at the same time.</p>
+      <form id="unlock-form" class="modal-form">
+        <label class="field">
+          <span>Demo write key</span>
+          <input id="unlock-api-key" name="api_key" type="password" autocomplete="current-password" required>
+        </label>
+        <p id="unlock-error" class="error-text" hidden></p>
+        <div class="modal-actions">
+          <button type="button" class="ghost-button" data-modal-close>Cancel</button>
+          <button type="submit" class="primary-button">Unlock writes</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="/common.js"></script>
+  <script src="/merchant.js"></script>
 </body>
 </html>
-

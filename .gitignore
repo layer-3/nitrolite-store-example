@@ -5,4 +5,7 @@ bin/
 dist/
 coverage.out
 *.test
+data/
 
+# Local Codex-only reference material
+.codex/local/

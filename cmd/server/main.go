@@ -12,7 +12,9 @@ import (
 	"github.com/layer-3/nitrolite-go-example/internal/config"
 	internalhttp "github.com/layer-3/nitrolite-go-example/internal/httpapi"
 	"github.com/layer-3/nitrolite-go-example/internal/nitrolite"
+	"github.com/layer-3/nitrolite-go-example/internal/service"
 	"github.com/layer-3/nitrolite-go-example/internal/signing"
+	"github.com/layer-3/nitrolite-go-example/internal/store"
 )
 
 func main() {
@@ -37,9 +39,27 @@ func main() {
 		logger.Error("failed to initialize nitrolite manager", "error", err)
 		os.Exit(1)
 	}
-	go manager.Run(ctx)
 
-	handler, err := internalhttp.NewHandler(cfg, manager, logger)
+	appStore, err := store.New(cfg.SQLitePath)
+	if err != nil {
+		logger.Error("failed to initialize sqlite store", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := appStore.Close(); err != nil {
+			logger.Error("failed to close sqlite store", "error", err)
+		}
+	}()
+	if err := appStore.ClearLease(ctx); err != nil {
+		logger.Error("failed to clear operator lease", "error", err)
+		os.Exit(1)
+	}
+
+	runner := service.NewMerchantOperationRunner(cfg, appStore, manager, signer, logger)
+	go manager.Run(ctx)
+	go runner.Run(ctx)
+
+	handler, err := internalhttp.NewHandler(cfg, manager, signer, appStore, logger)
 	if err != nil {
 		logger.Error("failed to build handler", "error", err)
 		os.Exit(1)
@@ -62,7 +82,7 @@ func main() {
 		}
 	}()
 
-	logger.Info("starting server", "addr", srv.Addr, "mode", "scaffold")
+	logger.Info("starting server", "addr", srv.Addr, "mode", "merchant-dashboard-reference-advanced")
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Error("server exited", "error", err)
 		os.Exit(1)

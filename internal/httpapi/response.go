@@ -33,6 +33,24 @@ func writeError(w http.ResponseWriter, status int, code string, message string) 
 }
 
 func writeServiceError(w http.ResponseWriter, err error) {
+	var validationErr service.ValidationError
+	if errors.As(err, &validationErr) {
+		writeError(w, http.StatusBadRequest, "invalid_request", validationErr.Error())
+		return
+	}
+
+	var notFoundErr service.NotFoundError
+	if errors.As(err, &notFoundErr) {
+		writeError(w, http.StatusUnprocessableEntity, "not_found", notFoundErr.Error())
+		return
+	}
+
+	var conflictErr service.ConflictError
+	if errors.As(err, &conflictErr) {
+		writeError(w, http.StatusConflict, "conflict", conflictErr.Error())
+		return
+	}
+
 	if errors.Is(err, service.ErrUnavailable) {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "clearnode not reachable")
 		return
