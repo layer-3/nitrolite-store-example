@@ -1,48 +1,34 @@
 # AGENTS
 
 Read order:
-1. `.codex/STATE.md`
-2. `README.md`
-3. `CLAUDE.md`
-4. `docs/api.md`
-5. `docs/architecture.md`
-6. `internal/config/config.go`
-7. `internal/store/`
-8. `internal/nitrolite/manager.go`
-9. `internal/service/`
-10. `internal/httpapi/`
-11. `internal/webui/handler.go`
-12. `web/`
+1. `README.md`
+2. `CLAUDE.md`
+3. `docs/api.md`
+4. `docs/architecture.md`
+5. `internal/config/config.go`
+6. `internal/store/`
+7. `internal/nitrolite/manager.go`
+8. `internal/service/`
+9. `internal/httpapi/`
+10. `internal/webui/handler.go`
+11. `web/`
 
 Ownership:
+
 - `internal/config`: env parsing and validation
-- `internal/store`: SQLite schema, queries, lease persistence, merchant records
-- `internal/signing`: signer abstraction and demo signer
+- `internal/store`: SQLite schema, store sessions, purchases
+- `internal/signing`: signer abstraction, demo signer, derived store-app signer
 - `internal/nitrolite`: SDK lifecycle and reconnect manager
-- `internal/service`: merchant orchestration, async runner, raw SDK-backed business logic
-- `internal/httpapi`: decode -> service -> encode, auth tiers, OpenAPI surface
+- `internal/service`: store orchestration, catalog/content logic, raw SDK-backed business logic
+- `internal/httpapi`: decode -> service -> encode, browser cookie flow, write auth, OpenAPI surface
 - `internal/webui`: page routing for embedded assets
-- `web/`: operator dashboard, hosted pay page, embedded reference shell, advanced operator console
-
-Checkpoint rule:
-- update `.codex/STATE.md` after every meaningful green milestone
-- add `.codex/checkpoints/NNNN-*.md` at context-boundary changes
-
-UX review rule:
-- before shipping changes to `web/`, `README.md`, or API/docs surfaces, run the `ux-review` agent
-- the UX review must classify whether the surface is acting as:
-  - operator dashboard
-  - hosted pay page
-  - API reference
-  - advanced/operator tool
-- fix docs parity when the UX review finds stale contracts or misleading product framing
+- `web/`: store UI, embedded reference shell, advanced developer console
 
 Current scope:
+
 - same-binary Go server + embedded web assets
-- `/` operator dashboard
-- `/pay/{slug}` hosted sandbox pay page
+- `/` App Session Micropayment Store
 - `/reference` OpenAPI-backed embedded explorer
-- `/advanced` raw operator/debug console
-- SQLite-backed merchant records and operator lease
-- nested repo lives under `nitrolite/nitrolite-go-example`
-- no outer-repo branch switching
+- `/advanced` raw protocol/developer console
+- one browser-scoped store session per asset
+- seeded content catalog with purchased-content gating

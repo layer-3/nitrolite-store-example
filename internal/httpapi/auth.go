@@ -15,6 +15,8 @@ import (
 const (
 	writeSessionCookieName = "nitrolite_write_session"
 	writeSessionTTL        = 2 * time.Hour
+	storeBrowserCookieName = "nitrolite_store_browser"
+	storeBrowserCookieTTL  = 30 * 24 * time.Hour
 )
 
 type unlockRequest struct {
@@ -276,3 +278,33 @@ func randomToken() (string, error) {
 }
 
 var errNoCookie = errors.New("missing cookie")
+
+func ensureStoreBrowserSession(w http.ResponseWriter, r *http.Request) (string, bool, error) {
+	if token, ok := readStoreBrowserSession(r); ok {
+		return token, false, nil
+	}
+
+	token, err := randomToken()
+	if err != nil {
+		return "", false, err
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     storeBrowserCookieName,
+		Value:    token,
+		Path:     "/",
+		Expires:  time.Now().UTC().Add(storeBrowserCookieTTL),
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   requestIsSecure(r),
+	})
+	return token, true, nil
+}
+
+func readStoreBrowserSession(r *http.Request) (string, bool) {
+	cookie, err := r.Cookie(storeBrowserCookieName)
+	if err != nil {
+		return "", false
+	}
+	token := strings.TrimSpace(cookie.Value)
+	return token, token != ""
+}

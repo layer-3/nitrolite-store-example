@@ -12,7 +12,6 @@ import (
 	"github.com/layer-3/nitrolite-go-example/internal/config"
 	internalhttp "github.com/layer-3/nitrolite-go-example/internal/httpapi"
 	"github.com/layer-3/nitrolite-go-example/internal/nitrolite"
-	"github.com/layer-3/nitrolite-go-example/internal/service"
 	"github.com/layer-3/nitrolite-go-example/internal/signing"
 	"github.com/layer-3/nitrolite-go-example/internal/store"
 )
@@ -28,13 +27,18 @@ func main() {
 	}
 
 	logger := newLogger(cfg.LogLevel)
-	signer, err := signing.NewEnvSigner(cfg.DemoPrivateKey)
+	userSigner, err := signing.NewEnvSigner(cfg.DemoPrivateKey)
 	if err != nil {
 		logger.Error("failed to initialize signer", "error", err)
 		os.Exit(1)
 	}
+	appSigner, err := signing.NewStoreAppSigner(cfg.StoreAppPrivateKey, cfg.DemoPrivateKey)
+	if err != nil {
+		logger.Error("failed to initialize store app signer", "error", err)
+		os.Exit(1)
+	}
 
-	manager, err := nitrolite.NewSDKManager(ctx, cfg, signer, logger)
+	manager, err := nitrolite.NewSDKManager(ctx, cfg, userSigner, logger)
 	if err != nil {
 		logger.Error("failed to initialize nitrolite manager", "error", err)
 		os.Exit(1)
@@ -50,16 +54,10 @@ func main() {
 			logger.Error("failed to close sqlite store", "error", err)
 		}
 	}()
-	if err := appStore.ClearLease(ctx); err != nil {
-		logger.Error("failed to clear operator lease", "error", err)
-		os.Exit(1)
-	}
 
-	runner := service.NewMerchantOperationRunner(cfg, appStore, manager, signer, logger)
 	go manager.Run(ctx)
-	go runner.Run(ctx)
 
-	handler, err := internalhttp.NewHandler(cfg, manager, signer, appStore, logger)
+	handler, err := internalhttp.NewHandler(cfg, manager, userSigner, appSigner, appStore, logger)
 	if err != nil {
 		logger.Error("failed to build handler", "error", err)
 		os.Exit(1)
@@ -82,7 +80,7 @@ func main() {
 		}
 	}()
 
-	logger.Info("starting server", "addr", srv.Addr, "mode", "merchant-dashboard-reference-advanced")
+	logger.Info("starting server", "addr", srv.Addr, "mode", "store-reference-advanced")
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Error("server exited", "error", err)
 		os.Exit(1)

@@ -390,6 +390,22 @@ code {
   color: var(--muted);
 }
 
+.summary-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--panel-border);
+  background: rgba(255, 255, 255, 0.58);
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+}
+
+.summary-row strong {
+  text-align: right;
+}
+
 .hint {
   margin: 0;
   line-height: 1.6;
@@ -478,6 +494,63 @@ code {
   flex-wrap: wrap;
   gap: 10px;
   justify-content: flex-end;
+}
+
+.catalog-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.catalog-card,
+.reader-shell {
+  border-radius: var(--radius-md);
+  border: 1px solid var(--panel-border);
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.catalog-card {
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+}
+
+.catalog-card h3,
+.reader-content h3 {
+  margin: 0;
+}
+
+.catalog-card .eyebrow,
+.reader-content .eyebrow {
+  margin-bottom: 0;
+}
+
+.catalog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.price-tag {
+  margin: 0;
+  font-size: 1.05rem;
+  color: var(--accent-strong);
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+}
+
+.reader-shell {
+  min-height: 320px;
+  padding: 18px;
+}
+
+.reader-content {
+  display: grid;
+  gap: 12px;
+}
+
+.reader-content pre {
+  margin-top: 6px;
+  max-height: 520px;
 }
 
 .inline-link {

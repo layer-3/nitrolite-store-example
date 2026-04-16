@@ -1,32 +1,35 @@
 # nitrolite-go-example
 
-Same-binary Go reference app for a Nitrolite-backed **merchant settlement service**.
+Same-binary Go reference app for a Nitrolite-backed **App Session Micropayment Store**.
 
-This repo is no longer a protocol-first guided demo. The primary product surface is a merchant operator dashboard backed by a Go service that owns the signer, persists merchant state in SQLite, and serializes settlement operations through one runner.
+The public product surface is a small content store at `/`. A user opens one store session per asset, deposits balance into that app session, buys content instantly, and withdraws what remains. `/reference` and `/advanced` stay available as hidden developer surfaces.
 
 ## Surfaces
 
-The same Go binary serves four surfaces:
-
-- `/` operator dashboard
-- `/pay/{slug}` hosted sandbox payment page
+- `/` App Session Micropayment Store
 - `/reference` embedded OpenAPI reference
-- `/advanced` raw protocol/operator console
+- `/advanced` raw protocol/developer console
 
 ## What This Demonstrates
 
-- backend-owned Nitrolite signer
-- long-lived SDK manager with reconnect behavior
-- hosted pay links with sandbox capture simulation
-- order reservation, settlement, refund, and payout flows
-- single active operator lease for merchant writes
-- embedded browser UI plus JSON API from one deployable Go service
+- one Go binary serving product UI, API, and developer tooling
+- Nitrolite app sessions as the store balance rail
+- a single `POST /api/v1/app-session/submit-state` endpoint that dispatches by `session_data.action`
+- instant content gating after successful purchase
+- YUSD and YELLOW catalog pricing from the same seeded catalog
 
-This is intentionally:
+## Current trust model
 
-- not multi-tenant
-- not customer-wallet-based
-- not production custody guidance
+This v1 implementation is intentionally simple.
+
+- the browser gets a long-lived **store browser cookie** as its store identity namespace
+- Nitrolite signing still happens server-side
+- the Go server holds:
+  - the demo/user signer
+  - the store/app signer
+- purchases and library access are isolated per browser cookie, not per external wallet
+
+This is a pragmatic reference build, not the final non-custodial shape.
 
 ## Quickstart
 
@@ -37,9 +40,9 @@ go run ./cmd/server
 
 Open [http://localhost:8080/](http://localhost:8080/).
 
-If you already had an older server running, stop it first. The web assets are embedded into the Go binary, so an old process will keep serving the old UI until you restart it.
+If you were previously running an older build of this app, stop that server first. Web assets are embedded into the Go binary, so an older process will keep serving stale UI until restarted.
 
-## Required Environment
+## Required environment
 
 Required:
 
@@ -54,129 +57,105 @@ Optional with defaults:
 - `PORT=8080`
 - `LOG_LEVEL=info`
 - `SQLITE_PATH=./data/nitrolite-go-example.db`
-- `MERCHANT_NAME=Nitrolite Sandbox Merchant`
-- `MERCHANT_APP_ID=default`
+- `STORE_NAME=Nitrolite App Session Store`
+- `STORE_APP_ID=default`
+- `STORE_APP_PRIVATE_KEY=` to override the derived store-app signer
 
-Important runtime assumptions:
+Runtime assumptions:
 
-- the demo signer wallet must have gas and sandbox funds
-- the configured `MERCHANT_APP_ID` must exist on the node
+- the demo signer wallet must already have sandbox funds
+- the configured home-channel assets must exist on the node
 - the RPC URLs must support the configured home chains
 
-## Recommended Local Flow
+## Recommended local flow
 
 1. Open `/`
-2. Click `Unlock write actions`
-3. Enter `CONSOLE_API_KEY`
-4. Click `Acquire operator lease`
-5. Create a payment request
-6. Open the generated `/pay/{slug}` link in another tab
-7. Click `Pay now`
-8. Return to `/` and watch the order/operation progress
-9. Settle, refund, or queue a payout
+2. Pick `YUSD` or `YELLOW`
+3. Click `Create or load session`
+4. Deposit into the store session
+5. Purchase an item from the catalog
+6. Open the purchased item in the reader or library
+7. Withdraw any remaining user allocation
 
-## Auth And Concurrency Model
+For hidden developer-only app revenue withdraws or raw protocol mutations:
 
-Reads are public.
+1. Unlock writes with `CONSOLE_API_KEY`
+2. Use `/advanced` or submit `app_withdraw` via the store mutation endpoint
 
-Writes use three tiers:
+## API shape
 
-- raw protocol writes in `/advanced`
-  - bearer key or unlocked browser write cookie
-- merchant operator writes
-  - unlocked browser write cookie
-  - active operator lease ownership
-- hosted pay action `POST /api/v1/payment-requests/{slug}/pay`
-  - public
-  - no customer auth
+Store-first routes:
 
-The lease exists because the backend signer is shared and merchant mutations are async, stateful, and order-sensitive.
+- `GET /api/v1/store/config`
+- `GET /api/v1/catalog`
+- `GET /api/v1/catalog/{id}`
+- `GET /api/v1/store/session?asset=...`
+- `POST /api/v1/store/session/create`
+- `POST /api/v1/app-session/submit-state`
+- `GET /api/v1/purchases`
+- `GET /api/v1/content/{id}`
+- `GET /api/v1/balance?asset=...`
 
-## Sandbox Pay Flow
+The single store mutation endpoint expects `session_data` JSON. Examples:
 
-`/pay/{slug}` is a **sandbox payment simulation**.
+```json
+{"action":"deposit","amount":"1.00"}
+{"action":"purchase","item_id":"article-micropayments","price":"0.50"}
+{"action":"user_withdraw","amount":"0.50"}
+```
 
-That means:
-
-- no customer wallet connect
-- no card acquiring
-- clicking `Pay now` queues a backend capture flow using the demo signer
-
-The point is to demonstrate how a Go backend can make blockchain mostly invisible while still using Nitrolite underneath.
+The server always revalidates catalog price and allocation math before co-signing.
 
 ## Persistence
 
 SQLite stores:
 
-- payment requests
-- orders
-- payouts
-- operations
-- operator lease
+- browser-scoped store sessions
+- purchases
+- legacy unused tables that are no longer part of the active product path
 
 Default path:
 
 - `./data/nitrolite-go-example.db`
 
-`data/` is gitignored.
+If you are switching from an older build, delete the old local DB first if you want a clean store state:
 
-## Railway Note
+```bash
+rm -f ./data/nitrolite-go-example.db
+```
 
-SQLite is only durable on Railway if you mount a Volume.
+## Running tests
 
-Recommended deploy setup:
-
-- mount a Volume at `/data`
-- set `SQLITE_PATH=/data/nitrolite-go-example.db`
-
-Without a Volume, SQLite data is lost on redeploy/rebuild.
-
-## Running Tests
+Standard:
 
 ```bash
 go test ./...
 ```
 
-The current test suite covers:
+If your machine blocks cgo builds because of the local Xcode license state, use:
 
-- merchant route contracts
-- auth tier behavior
-- operator lease ownership rules
-- embedded surface smoke checks
+```bash
+CGO_ENABLED=0 GOCACHE=/tmp/nitrolite-go-example-gocache go test ./...
+```
 
 ## Troubleshooting
 
-If you still see the old “Go SDK guided demo” UI:
+If you still see an older UI or the old “Go SDK guided demo” UI:
 
-- you are running an older compiled server
-- stop the process on `:8080`
-- start `go run ./cmd/server` again
+- stop the existing process on `:8080`
+- restart with `go run ./cmd/server`
 - hard refresh the browser
 
-If merchant actions fail:
+If store actions fail:
 
 - check `/healthz`
-- confirm the demo wallet has funds
-- confirm `MERCHANT_APP_ID` exists
-- inspect the operations list on `/`
+- confirm the demo wallet has balance in the selected asset
+- inspect `/advanced` for raw SDK state
+- use `/reference` to inspect the live request/response shapes
 
-## Production Caveats
+## Where to look
 
-This repo is a reference app, not a production service.
-
-Before using this pattern in production, change at least:
-
-- demo signer storage and key management
-- single-process in-memory write sessions
-- SQLite durability and backup strategy
-- hosted pay flow semantics
-- operator identity and lease model
-- tx confirmation and clearnode sync observability
-
-## Where To Look
-
-- [`AGENTS.md`](/Users/maharshimishra/Documents/nitrolite/nitrolite-go-example/AGENTS.md)
-- [`CLAUDE.md`](/Users/maharshimishra/Documents/nitrolite/nitrolite-go-example/CLAUDE.md)
-- [`docs/api.md`](/Users/maharshimishra/Documents/nitrolite/nitrolite-go-example/docs/api.md)
-- [`docs/architecture.md`](/Users/maharshimishra/Documents/nitrolite/nitrolite-go-example/docs/architecture.md)
-- [`.codex/STATE.md`](/Users/maharshimishra/Documents/nitrolite/nitrolite-go-example/.codex/STATE.md)
+- [`AGENTS.md`](./AGENTS.md)
+- [`CLAUDE.md`](./CLAUDE.md)
+- [`docs/api.md`](./docs/api.md)
+- [`docs/architecture.md`](./docs/architecture.md)

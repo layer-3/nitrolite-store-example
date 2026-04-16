@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Nitrolite Go Example | Advanced Operator</title>
+  <title>Nitrolite Go Example | Advanced Developer</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body class="page page-advanced">
@@ -11,15 +11,12 @@
   <header class="site-header">
     <div>
       <p class="eyebrow">Nitrolite Go Example</p>
-      <h1>Advanced operator console</h1>
-      <p class="lede">Low-level JSON panels, raw mutation forms, and destructive operations for protocol debugging.</p>
+      <h1>Advanced developer console</h1>
+      <p class="lede">Low-level JSON panels, raw mutation forms, and destructive operations for protocol debugging behind the store app.</p>
     </div>
-    <nav class="site-nav" aria-label="Primary">
-      <a class="nav-link" href="/">Operator Dashboard</a>
-      <a class="nav-link" href="/reference">API Reference</a>
-      <a class="nav-link active" href="/advanced">Advanced</a>
-    </nav>
     <div class="site-actions">
+      <a class="secondary-link" href="/">Back to store</a>
+      <a class="secondary-link" href="/reference">API reference</a>
       <button type="button" class="ghost-button" data-auth-open>Unlock write actions</button>
       <button type="button" class="ghost-button" data-auth-lock hidden>Lock</button>
       <button id="advanced-refresh" type="button" class="primary-button">Refresh all</button>
@@ -30,11 +27,11 @@
     <section class="panel">
       <div class="section-header">
         <div>
-          <p class="eyebrow">Operator mode</p>
+          <p class="eyebrow">Developer mode</p>
           <h2>Raw surfaces, live context</h2>
         </div>
       </div>
-      <p class="muted">Use this page when you need transport-level visibility, direct JSON payloads, session-key registration, or destructive operations. For business-facing evaluation, stay on the operator dashboard.</p>
+      <p class="muted">Use this page when you need transport-level visibility, direct JSON payloads, session-key registration, or destructive operations. For the product-facing flow, stay on the store at `/`.</p>
       <div class="flow-banner" data-auth-status>Checking unlock status…</div>
       <div class="flow-toolbar">
         <label class="field">

@@ -36,17 +36,14 @@ func buildOpenAPISpec(cfg *config.Config) map[string]any {
 		"info": map[string]any{
 			"title":       "Nitrolite Go Example API",
 			"version":     "1.0.0",
-			"description": "Merchant settlement reference API for the Nitrolite Go example. Reads are public. Browser writes use a short-lived write-session cookie, and merchant mutations additionally require the active operator lease.",
+			"description": "App Session Micropayment Store reference API for the Nitrolite Go example. The public product surface is a content store at `/`, while `/reference` and `/advanced` remain hidden developer surfaces for direct route exploration.",
 		},
 		"servers": []map[string]any{{"url": "/"}},
 		"tags": []map[string]any{
 			{"name": "Health / Wallet / Node"},
-			{"name": "Merchant Dashboard"},
-			{"name": "Payment Requests"},
-			{"name": "Orders"},
-			{"name": "Payouts"},
-			{"name": "Operations"},
-			{"name": "Operator Lease"},
+			{"name": "Store"},
+			{"name": "Catalog"},
+			{"name": "Content"},
 			{"name": "Raw Channel"},
 			{"name": "Raw Sessions"},
 			{"name": "Raw Session Keys"},
@@ -95,37 +92,6 @@ func buildOpenAPISpec(cfg *config.Config) map[string]any {
 						"expires_at": map[string]any{"type": "string", "format": "date-time"},
 					},
 				},
-				"LeaseStatus": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"held":                     map[string]any{"type": "boolean"},
-						"owned_by_current_session": map[string]any{"type": "boolean"},
-						"acquired_at":              map[string]any{"type": "string", "format": "date-time"},
-						"heartbeat_at":             map[string]any{"type": "string", "format": "date-time"},
-						"expires_at":               map[string]any{"type": "string", "format": "date-time"},
-					},
-					"required": []string{"held"},
-				},
-				"PaymentRequestCreateResponse": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"payment_request_id": map[string]any{"type": "string"},
-						"slug":               map[string]any{"type": "string"},
-						"pay_url":            map[string]any{"type": "string"},
-						"status":             map[string]any{"type": "string"},
-						"payment_request":    genericObjectSchema(),
-					},
-					"required": []string{"payment_request_id", "slug", "pay_url", "status"},
-				},
-				"AsyncOperationAccepted": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"operation_id": map[string]any{"type": "string"},
-						"resource_id":  map[string]any{"type": "string"},
-						"status":       map[string]any{"type": "string"},
-					},
-					"required": []string{"operation_id", "resource_id", "status"},
-				},
 				"GenericObject": genericObjectSchema(),
 			},
 		},
@@ -172,6 +138,125 @@ func buildOpenAPISpec(cfg *config.Config) map[string]any {
 					}},
 				}),
 			},
+			"/api/v1/store/config": map[string]any{
+				"get": readOperation("Store", "Store config", "Returns store metadata, supported assets, and the seeded catalog summary. The first request also ensures a browser-scoped store session cookie exists.", "", map[string]any{
+					"browser_session_id": "browser_123",
+					"store": map[string]any{
+						"store_name":       cfg.StoreName,
+						"app_id":           cfg.StoreAppID,
+						"default_asset":    exampleAsset,
+						"supported_assets": []string{exampleAsset},
+						"catalog":          []map[string]any{{"id": "book-go-101", "title": "Go Systems Handbook"}},
+					},
+				}),
+			},
+			"/api/v1/catalog": map[string]any{
+				"get": readOperation("Catalog", "Catalog listing", "Lists the store catalog filtered to a selected asset.", "", map[string]any{
+					"items": []map[string]any{{
+						"id":          "book-go-101",
+						"title":       "Go Systems Handbook",
+						"type":        "book",
+						"description": "A practical field guide to Go services.",
+						"prices":      map[string]any{exampleAsset: "2.50"},
+					}},
+				}),
+			},
+			"/api/v1/catalog/{id}": map[string]any{
+				"get": readOperation("Catalog", "Catalog item", "Returns one catalog item for the requested asset.", "", map[string]any{
+					"item": map[string]any{
+						"id":          "book-go-101",
+						"title":       "Go Systems Handbook",
+						"type":        "book",
+						"description": "A practical field guide to Go services.",
+						"prices":      map[string]any{exampleAsset: "2.50"},
+					},
+				}),
+			},
+			"/api/v1/store/session": map[string]any{
+				"get": readOperation("Store", "Current store session", "Returns the browser-scoped store session summary for one asset. If no session exists yet, the status is `missing`.", "", map[string]any{
+					"session": map[string]any{
+						"asset":             exampleAsset,
+						"status":            "missing",
+						"available_balance": "5",
+						"user_allocation":   "0",
+						"app_allocation":    "0",
+					},
+				}),
+			},
+			"/api/v1/store/session/create": map[string]any{
+				"post": map[string]any{
+					"tags":        []string{"Store"},
+					"summary":     "Create or load store session",
+					"description": "Creates one browser-scoped app session for the selected asset if it does not already exist, or returns the existing one.",
+					"requestBody": requestBody("", map[string]any{"asset": exampleAsset}),
+					"responses": standardResponses(http.StatusOK, "", map[string]any{
+						"session": map[string]any{
+							"asset":           exampleAsset,
+							"app_session_id":  "0xsession",
+							"status":          "open",
+							"version":         1,
+							"user_allocation": "0",
+							"app_allocation":  "0",
+						},
+					}, true),
+				},
+			},
+			"/api/v1/app-session/submit-state": map[string]any{
+				"post": map[string]any{
+					"tags":        []string{"Store"},
+					"summary":     "Submit store app-session state",
+					"description": "Single store mutation endpoint. The server inspects `session_data.action` and dispatches deposit, purchase, `user_withdraw`, or hidden `app_withdraw` logic. Purchase pricing is always revalidated against the server catalog.",
+					"requestBody": requestBody("", map[string]any{
+						"session_id":   "0xsession",
+						"asset":        exampleAsset,
+						"session_data": "{\"action\":\"purchase\",\"item_id\":\"book-go-101\",\"price\":\"2.50\"}",
+					}),
+					"responses": standardResponses(http.StatusOK, "", map[string]any{
+						"session": map[string]any{
+							"asset":           exampleAsset,
+							"app_session_id":  "0xsession",
+							"status":          "open",
+							"version":         2,
+							"user_allocation": "2.50",
+							"app_allocation":  "2.50",
+							"session_data":    "{\"action\":\"purchase\",\"item_id\":\"book-go-101\",\"price\":\"2.50\"}",
+						},
+					}, true),
+				},
+			},
+			"/api/v1/purchases": map[string]any{
+				"get": readOperation("Content", "Purchased items", "Lists purchased items for the current browser-scoped store identity and selected asset.", "", map[string]any{
+					"purchases": []map[string]any{{
+						"item_id":        "book-go-101",
+						"asset":          exampleAsset,
+						"app_session_id": "0xsession",
+						"version":        2,
+					}},
+				}),
+			},
+			"/api/v1/content/{id}": map[string]any{
+				"get": readOperation("Content", "Purchased content", "Returns content only if the current browser session has already purchased the item for the selected asset.", "", map[string]any{
+					"item": map[string]any{
+						"id":          "book-go-101",
+						"title":       "Go Systems Handbook",
+						"type":        "book",
+						"description": "A practical field guide to Go services.",
+						"prices":      map[string]any{exampleAsset: "2.50"},
+						"content":     "Go Systems Handbook\\n\\nThis sample chapter walks through interfaces and runtime lifecycles.",
+					},
+				}),
+			},
+			"/api/v1/balance": map[string]any{
+				"get": readOperation("Store", "Store balance summary", "Returns the available off-session balance plus the current user and app allocations for one asset.", "", map[string]any{
+					"asset":             exampleAsset,
+					"available_balance": "5",
+					"user_allocation":   "2.50",
+					"app_allocation":    "2.50",
+					"session_status":    "open",
+					"session_id":        "0xsession",
+					"version":           2,
+				}),
+			},
 			"/api/v1/balances": map[string]any{
 				"get": readOperation("Health / Wallet / Node", "Balances", "Current off-chain balances for the backend signer.", "", map[string]any{
 					"balances": []map[string]any{{"asset": exampleAsset, "balance": "2.5"}},
@@ -181,106 +266,6 @@ func buildOpenAPISpec(cfg *config.Config) map[string]any {
 				"get": readOperation("Health / Wallet / Node", "Transactions", "Recent transaction history for the signer.", "", map[string]any{
 					"transactions": []map[string]any{{"asset": exampleAsset, "type": "transfer", "amount": "1"}},
 				}),
-			},
-			"/api/v1/dashboard/overview": map[string]any{
-				"get": readOperation("Merchant Dashboard", "Dashboard overview", "Aggregated merchant dashboard read model. If required SDK reads fail, this route returns 503 and the UI falls back to `/healthz`.", "", map[string]any{
-					"merchant_name":  cfg.MerchantName,
-					"selected_asset": exampleAsset,
-					"summary": map[string]any{
-						"available_balance": "4",
-						"reserved_balance":  "1",
-						"pending_count":     1,
-						"open_orders":       1,
-					},
-				}),
-			},
-			"/api/v1/payment-requests": map[string]any{
-				"post": operatorLeaseOperation("Payment Requests", "Create payment request", "Creates a hosted sandbox pay link. Requires an unlocked browser write session that also owns the active operator lease.", requestBody("", map[string]any{
-					"title":       "Sandbox order",
-					"description": "Nitrolite sandbox checkout",
-					"asset":       exampleAsset,
-					"amount":      "1.00",
-				}), "PaymentRequestCreateResponse", map[string]any{
-					"payment_request_id": "req_123",
-					"slug":               "merchant-demo-1234",
-					"pay_url":            "/pay/merchant-demo-1234",
-					"status":             "pending",
-				}, http.StatusCreated),
-			},
-			"/api/v1/payment-requests/{slug}": map[string]any{
-				"get": readOperation("Payment Requests", "Payment request page data", "Returns the hosted payment page read model.", "", map[string]any{
-					"merchant_name": cfg.MerchantName,
-					"payment_request": map[string]any{
-						"slug":   "merchant-demo-1234",
-						"status": "pending",
-					},
-				}),
-			},
-			"/api/v1/payment-requests/{slug}/pay": map[string]any{
-				"post": asyncPublicOperation("Payment Requests", "Pay payment request", "Public sandbox payment simulation. No browser auth or wallet connect is required. The backend creates or reuses the capture operation idempotently.", map[string]any{}, map[string]any{
-					"operation_id": "op_capture_123",
-					"resource_id":  "order_123",
-					"status":       "queued",
-				}),
-			},
-			"/api/v1/orders": map[string]any{
-				"get": readOperation("Orders", "Orders", "Lists recent merchant orders.", "", map[string]any{
-					"orders": []map[string]any{{"order_id": "order_123", "status": "reserved", "amount": "1"}},
-				}),
-			},
-			"/api/v1/orders/{id}": map[string]any{
-				"get": readOperation("Orders", "Order detail", "Returns one order from the merchant store.", "", map[string]any{
-					"order": map[string]any{"order_id": "order_123", "status": "reserved"},
-				}),
-			},
-			"/api/v1/orders/{id}/settle": map[string]any{
-				"post": asyncOperatorOperation("Orders", "Settle order", "Queues settlement for a reserved order. Requires the active operator lease.", map[string]any{}, map[string]any{
-					"operation_id": "op_settle_123",
-					"resource_id":  "order_123",
-					"status":       "queued",
-				}),
-			},
-			"/api/v1/orders/{id}/refund": map[string]any{
-				"post": asyncOperatorOperation("Orders", "Refund order", "Queues refund for a reserved order. Requires the active operator lease.", map[string]any{}, map[string]any{
-					"operation_id": "op_refund_123",
-					"resource_id":  "order_123",
-					"status":       "queued",
-				}),
-			},
-			"/api/v1/payouts": map[string]any{
-				"get": readOperation("Payouts", "Payouts", "Lists recent payout requests.", "", map[string]any{
-					"payouts": []map[string]any{{"payout_id": "payout_123", "status": "pending", "amount": "0.5"}},
-				}),
-				"post": asyncOperatorOperation("Payouts", "Create payout", "Queues a merchant payout. Requires the active operator lease.", map[string]any{
-					"asset":              exampleAsset,
-					"amount":             "0.50",
-					"destination_wallet": "0x1111111111111111111111111111111111111111",
-				}, map[string]any{
-					"operation_id": "op_payout_123",
-					"resource_id":  "payout_123",
-					"status":       "queued",
-				}),
-			},
-			"/api/v1/operations/{id}": map[string]any{
-				"get": readOperation("Operations", "Operation detail", "Returns one asynchronous merchant operation.", "", map[string]any{
-					"operation": map[string]any{
-						"operation_id": "op_capture_123",
-						"status":       "waiting_sync",
-						"payload":      map[string]any{"step": "channel_sync_pending"},
-					},
-				}),
-			},
-			"/api/v1/operator/lease/status": map[string]any{
-				"get": readOperation("Operator Lease", "Lease status", "Public lease status so a second browser can see whether the operator dashboard is currently occupied.", "LeaseStatus", map[string]any{"held": false}),
-			},
-			"/api/v1/operator/lease/acquire": map[string]any{
-				"post": writeAccessOperation("Operator Lease", "Acquire operator lease", "Requires write access only. Acquires or refreshes the singleton operator lease for the current browser session.", requestBody("", map[string]any{}), "LeaseStatus", map[string]any{"held": true, "owned_by_current_session": true}),
-			},
-			"/api/v1/operator/lease/release": map[string]any{
-				"post": leaseOwnershipOperation("Operator Lease", "Release operator lease", "Requires lease ownership. The request must carry the browser write-session cookie and its token must match the current lease row.", requestBody("", map[string]any{}), "LeaseStatus", map[string]any{"held": false}),
-			},
-			"/api/v1/operator/lease/heartbeat": map[string]any{
-				"post": leaseOwnershipOperation("Operator Lease", "Heartbeat operator lease", "Requires lease ownership. Extends the current lease TTL for the owning browser session.", requestBody("", map[string]any{}), "LeaseStatus", map[string]any{"held": true, "owned_by_current_session": true}),
 			},
 			"/api/v1/channel": map[string]any{
 				"get": readOperation("Raw Channel", "Home channel", "Returns the home channel summary for an asset.", "", map[string]any{
@@ -340,7 +325,7 @@ func buildOpenAPISpec(cfg *config.Config) map[string]any {
 				"post": writeAccessOperation("Raw Channel", "Close channel", "Builds the finalize state for the selected asset.", requestBody("", map[string]any{"asset": exampleAsset}), "", map[string]any{"state": map[string]any{"version": 7, "asset": exampleAsset}}),
 			},
 			"/api/v1/apps": map[string]any{
-				"get": readOperation("Raw Sessions", "Apps", "Lists registered apps.", "", map[string]any{"apps": []map[string]any{{"app_id": cfg.MerchantAppID, "creation_approval_not_required": true}}}),
+				"get": readOperation("Raw Sessions", "Apps", "Lists registered apps.", "", map[string]any{"apps": []map[string]any{{"app_id": cfg.StoreAppID, "creation_approval_not_required": true}}}),
 			},
 			"/api/v1/apps/register": map[string]any{
 				"post": writeAccessOperation("Raw Sessions", "Register app", "Registers a new app definition.", requestBody("", map[string]any{
@@ -351,10 +336,10 @@ func buildOpenAPISpec(cfg *config.Config) map[string]any {
 			},
 			"/api/v1/sessions": map[string]any{
 				"get": readOperation("Raw Sessions", "Sessions", "Lists sessions for the signer by default.", "", map[string]any{
-					"sessions": []map[string]any{{"app_session_id": "0xsession", "application_id": cfg.MerchantAppID, "status": "open", "version": 4}},
+					"sessions": []map[string]any{{"app_session_id": "0xsession", "application_id": cfg.StoreAppID, "status": "open", "version": 4}},
 				}),
 				"post": writeAccessOperation("Raw Sessions", "Create session", "Creates a single-signer app session for the backend signer.", requestBody("", map[string]any{
-					"application_id": cfg.MerchantAppID,
+					"application_id": cfg.StoreAppID,
 					"initial_allocations": []map[string]any{
 						{"asset": exampleAsset, "amount": "0.5"},
 					},
@@ -364,7 +349,7 @@ func buildOpenAPISpec(cfg *config.Config) map[string]any {
 			"/api/v1/sessions/{session_id}": map[string]any{
 				"get": readOperation("Raw Sessions", "Session detail", "Returns the session and app definition for a specific session.", "", map[string]any{
 					"session":        map[string]any{"app_session_id": "0xsession", "version": 4},
-					"app_definition": map[string]any{"application_id": cfg.MerchantAppID},
+					"app_definition": map[string]any{"application_id": cfg.StoreAppID},
 				}),
 			},
 			"/api/v1/sessions/{session_id}/deposit": map[string]any{
@@ -394,7 +379,7 @@ func buildOpenAPISpec(cfg *config.Config) map[string]any {
 				"get": readOperation("Raw Session Keys", "App session keys", "Lists active app session key states.", "", map[string]any{"states": []any{}}),
 				"post": writeAccessOperation("Raw Session Keys", "Register app session key", "Registers an app session key state.", requestBody("", map[string]any{
 					"session_key":     "0x1111111111111111111111111111111111111111",
-					"application_ids": []string{cfg.MerchantAppID},
+					"application_ids": []string{cfg.StoreAppID},
 					"app_session_ids": []string{},
 					"expires_at":      "2030-01-01T00:00:00Z",
 				}), "", map[string]any{"state": map[string]any{"session_key": "0x1111111111111111111111111111111111111111", "version": 1}}),

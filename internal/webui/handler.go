@@ -28,9 +28,6 @@ func New() (http.Handler, error) {
 		case trimmed == "/advanced":
 			servePage(w, sub, "advanced.html")
 			return
-		case strings.HasPrefix(trimmed, "/pay/"):
-			servePage(w, sub, "pay.html")
-			return
 		}
 		fileserver.ServeHTTP(w, r)
 	}), nil

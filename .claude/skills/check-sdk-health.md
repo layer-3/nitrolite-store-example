@@ -8,7 +8,7 @@ Check:
 - sqlite path configured
 - signer init status
 - manager connected/ready flags
-- operator lease store reachable
+- store session persistence reachable
 
 Output:
 - pass/fail per check

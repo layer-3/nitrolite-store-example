@@ -169,6 +169,29 @@ func (s *Store) migrate(ctx context.Context) error {
 			heartbeat_at DATETIME NOT NULL,
 			expires_at DATETIME NOT NULL
 		);`,
+		`CREATE TABLE IF NOT EXISTS store_sessions (
+			browser_session_id TEXT NOT NULL,
+			asset TEXT NOT NULL,
+			app_session_id TEXT NOT NULL,
+			status TEXT NOT NULL,
+			version INTEGER NOT NULL,
+			user_allocation TEXT NOT NULL,
+			app_allocation TEXT NOT NULL,
+			session_data TEXT NOT NULL,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			PRIMARY KEY (browser_session_id, asset)
+		);`,
+		`CREATE TABLE IF NOT EXISTS purchases (
+			id TEXT PRIMARY KEY,
+			browser_session_id TEXT NOT NULL,
+			item_id TEXT NOT NULL,
+			asset TEXT NOT NULL,
+			app_session_id TEXT NOT NULL,
+			version INTEGER NOT NULL,
+			purchased_at DATETIME NOT NULL,
+			UNIQUE(browser_session_id, item_id, asset)
+		);`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {

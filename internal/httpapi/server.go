@@ -3,7 +3,6 @@ package httpapi
 import (
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/layer-3/nitrolite-go-example/internal/config"
 	"github.com/layer-3/nitrolite-go-example/internal/nitrolite"
@@ -13,10 +12,8 @@ import (
 	"github.com/layer-3/nitrolite-go-example/internal/webui"
 )
 
-const operatorLeaseTTL = 10 * time.Minute
-
 // NewHandler wires the current HTTP surface.
-func NewHandler(cfg *config.Config, manager *nitrolite.Manager, signer signing.Signer, appStore *store.Store, logger *slog.Logger) (http.Handler, error) {
+func NewHandler(cfg *config.Config, manager *nitrolite.Manager, userSigner signing.Signer, appSigner signing.Signer, appStore *store.Store, logger *slog.Logger) (http.Handler, error) {
 	ui, err := webui.New()
 	if err != nil {
 		return nil, err
@@ -26,20 +23,13 @@ func NewHandler(cfg *config.Config, manager *nitrolite.Manager, signer signing.S
 	balanceService := service.NewBalanceService(manager)
 	channelService := service.NewChannelService(manager)
 	mutationService := service.NewMutationService(manager, cfg.HomeBlockchains)
-	appSessionService := service.NewAppSessionService(manager, signer, nil)
+	appSessionService := service.NewAppSessionService(manager, userSigner, nil)
 	sessionKeyService := service.NewSessionKeyService(manager, nil)
 	demoService := service.NewDemoService(manager, manager.Health, cfg.HomeBlockchains)
-	merchantService := service.NewMerchantService(appStore, cfg.MerchantName, cfg.MerchantAppID, cfg.HomeBlockchains)
-	dashboardService := service.NewMerchantDashboardService(manager, appStore, cfg.MerchantName, cfg.HomeBlockchains)
+	storefrontService := service.NewStorefrontService(manager, appStore, userSigner, appSigner, cfg.StoreName, cfg.StoreAppID, cfg.HomeBlockchains)
 	writeSessions := newWriteSessionStore()
 	protected := func(handler http.HandlerFunc) http.Handler {
 		return requireWriteAccess(cfg.ConsoleAPIKey, writeSessions, handler)
-	}
-	protectedLeaseOwnership := func(handler http.HandlerFunc) http.Handler {
-		return requireLeaseOwnership(writeSessions, appStore, handler)
-	}
-	protectedOperator := func(handler http.HandlerFunc) http.Handler {
-		return requireOperatorLease(cfg.ConsoleAPIKey, writeSessions, appStore, handler)
 	}
 
 	mux := http.NewServeMux()
@@ -54,25 +44,19 @@ func NewHandler(cfg *config.Config, manager *nitrolite.Manager, signer signing.S
 	mux.Handle("GET /api/v1/node/blockchains", nodeBlockchainsHandler(nodeService))
 	mux.Handle("GET /api/v1/node/assets", nodeAssetsHandler(nodeService))
 	mux.Handle("GET /api/v1/demo/overview", demoOverviewHandler(demoService))
-	mux.Handle("GET /api/v1/dashboard/overview", dashboardOverviewHandler(dashboardService))
 	mux.Handle("GET /api/v1/balances", balancesHandler(balanceService))
 	mux.Handle("GET /api/v1/transactions", transactionsHandler(balanceService))
 	mux.Handle("GET /api/v1/channel", channelHandler(channelService))
 	mux.Handle("GET /api/v1/channel/state", channelStateHandler(channelService))
-	mux.Handle("POST /api/v1/payment-requests", protectedOperator(createPaymentRequestHandler(merchantService)))
-	mux.Handle("GET /api/v1/payment-requests/{slug}", paymentRequestPageHandler(merchantService))
-	mux.Handle("POST /api/v1/payment-requests/{slug}/pay", payPaymentRequestHandler(merchantService))
-	mux.Handle("GET /api/v1/orders", ordersHandler(appStore))
-	mux.Handle("GET /api/v1/orders/{id}", orderDetailHandler(appStore))
-	mux.Handle("POST /api/v1/orders/{id}/settle", protectedOperator(settleOrderHandler(merchantService)))
-	mux.Handle("POST /api/v1/orders/{id}/refund", protectedOperator(refundOrderHandler(merchantService)))
-	mux.Handle("GET /api/v1/payouts", payoutsHandler(appStore))
-	mux.Handle("POST /api/v1/payouts", protectedOperator(createPayoutHandler(merchantService)))
-	mux.Handle("GET /api/v1/operations/{id}", operationHandler(merchantService))
-	mux.Handle("GET /api/v1/operator/lease/status", leaseStatusHandler(appStore))
-	mux.Handle("POST /api/v1/operator/lease/acquire", protected(leaseAcquireHandler(appStore, operatorLeaseTTL)))
-	mux.Handle("POST /api/v1/operator/lease/release", protectedLeaseOwnership(leaseReleaseHandler(appStore)))
-	mux.Handle("POST /api/v1/operator/lease/heartbeat", protectedLeaseOwnership(leaseHeartbeatHandler(appStore, operatorLeaseTTL)))
+	mux.Handle("GET /api/v1/store/config", storeConfigHandler(storefrontService))
+	mux.Handle("GET /api/v1/catalog", storeCatalogHandler(storefrontService))
+	mux.Handle("GET /api/v1/catalog/{id}", storeCatalogItemHandler(storefrontService))
+	mux.Handle("GET /api/v1/store/session", storeSessionHandler(storefrontService))
+	mux.Handle("POST /api/v1/store/session/create", createStoreSessionHandler(storefrontService))
+	mux.Handle("POST /api/v1/app-session/submit-state", submitStoreStateHandler(storefrontService, cfg.ConsoleAPIKey, writeSessions))
+	mux.Handle("GET /api/v1/purchases", purchasesHandlerStore(storefrontService))
+	mux.Handle("GET /api/v1/content/{id}", contentHandler(storefrontService))
+	mux.Handle("GET /api/v1/balance", storeBalanceHandler(storefrontService))
 	mux.Handle("POST /api/v1/approve", protected(approveHandler(mutationService)))
 	mux.Handle("POST /api/v1/deposit", protected(depositHandler(mutationService)))
 	mux.Handle("POST /api/v1/withdraw", protected(withdrawHandler(mutationService)))

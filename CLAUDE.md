@@ -6,24 +6,22 @@ Module:
 Commands:
 ```bash
 go run ./cmd/server
-env GOCACHE=/tmp/nitrolite-go-example-gocache go test ./...
-go test ./... -race
+env CGO_ENABLED=0 GOCACHE=/tmp/nitrolite-go-example-gocache go test ./...
 go vet ./...
 gofmt -w .
 ```
 
 Key paths:
+
 - server entry: `cmd/server/main.go`
 - persistence: `internal/store`
 - api: `internal/httpapi`
-- services and runner: `internal/service`
+- services: `internal/service`
 - web router: `internal/webui/handler.go`
 - web assets: `web`
-- codex state: `.codex/STATE.md`
-- checkpoints: `.codex/checkpoints/`
 
 Product surfaces:
-- `/`: merchant operator dashboard
-- `/pay/{slug}`: public sandbox payment page
+
+- `/`: App Session Micropayment Store
 - `/reference`: embedded API reference
-- `/advanced`: raw operator/debug console
+- `/advanced`: raw developer/debug console

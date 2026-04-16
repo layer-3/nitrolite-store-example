@@ -8,4 +8,6 @@ coverage.out
 data/
 
 # Local Codex-only reference material
+.codex/STATE.md
+.codex/checkpoints/
 .codex/local/

@@ -1,4 +1,4 @@
-# /add-merchant-endpoint
+# /add-store-endpoint
 
 Create:
 - handler stub
@@ -6,10 +6,10 @@ Create:
 - route registration
 - OpenAPI entry
 - test stubs
-- dashboard/pay-page hook if UI-facing
+- store UI hook if user-facing
 
 Keep:
 - decode -> service -> encode shape
-- async contract where SDK writes are involved
-- lease/auth tier correctness
+- `session_data` as the store mutation contract
+- browser-cookie session semantics
 - decimal string amounts

@@ -8,88 +8,76 @@ The OpenAPI document served by the Go backend is the source of truth for:
 
 - route inventory
 - request/response examples
-- auth tier expectations
-- async vs sync mutation contracts
+- raw write-auth expectations
+- store session semantics
 
 ## Main route groups
 
 - Health / Wallet / Node
-- Merchant Dashboard
-- Payment Requests
-- Orders
-- Payouts
-- Operations
-- Operator Lease
+- Store
+- Catalog
+- Content
 - Raw Channel
 - Raw Sessions
 - Raw Session Keys
 - Auth
 - Legacy
 
-## Auth tiers
+## Store routes
+
+- `GET /api/v1/store/config`
+- `GET /api/v1/catalog`
+- `GET /api/v1/catalog/{id}`
+- `GET /api/v1/store/session?asset=...`
+- `POST /api/v1/store/session/create`
+- `POST /api/v1/app-session/submit-state`
+- `GET /api/v1/purchases`
+- `GET /api/v1/content/{id}`
+- `GET /api/v1/balance?asset=...`
+
+## Store auth model
 
 Reads are public.
 
-Writes use three tiers:
+Store product routes use a browser-scoped cookie:
 
-- `requireWriteAccess()`
-  - bearer key or unlocked browser write-session cookie
-  - used by `/advanced` raw mutation routes
-  - used by `POST /api/v1/operator/lease/acquire`
+- `GET /api/v1/store/config` ensures the cookie exists
+- store sessions and purchases are isolated per browser cookie value
+- no wallet connect and no external login is required in v1
 
-- `requireLeaseOwnership()`
-  - write-session cookie must be present
-  - cookie token must match `operator_lease.session_token`
-  - used by `POST /api/v1/operator/lease/release` and `/heartbeat`
+Raw mutation routes in `/advanced` use `requireWriteAccess()`:
 
-- `requireOperatorLease()`
-  - valid write-session cookie
-  - active lease owned by that cookie token
-  - used by merchant operator writes such as:
-    - `POST /api/v1/payment-requests`
-    - `POST /api/v1/orders/{id}/settle`
-    - `POST /api/v1/orders/{id}/refund`
-    - `POST /api/v1/payouts`
+- bearer key or unlocked write-session cookie
 
-Public exception:
+Hidden developer-only capability:
 
-- `POST /api/v1/payment-requests/{slug}/pay`
-  - intentionally unauthenticated
-  - sandbox payment simulation only
+- `app_withdraw` still goes through `POST /api/v1/app-session/submit-state`
+- but the server only allows it when write access is present
 
-## Response contracts
+## Submit-state contract
 
-`POST /api/v1/payment-requests`
+`POST /api/v1/app-session/submit-state` is the single store mutation endpoint.
 
-- returns `201 Created`
-- body includes:
-  - `payment_request_id`
-  - `slug`
-  - `pay_url`
-  - `status`
+Required request fields:
 
-Async merchant mutations
+- `session_id`
+- `asset`
+- `session_data`
 
-- return `202 Accepted`
-- body includes:
-  - `operation_id`
-  - `resource_id`
-  - `status`
+`session_data` is JSON encoded as a string and must describe the action:
 
-These routes are async:
+```json
+{"action":"deposit","amount":"1.00"}
+{"action":"purchase","item_id":"article-micropayments","price":"0.50"}
+{"action":"user_withdraw","amount":"0.50"}
+{"action":"app_withdraw","amount":"0.50"}
+```
 
-- `POST /api/v1/payment-requests/{slug}/pay`
-- `POST /api/v1/orders/{id}/settle`
-- `POST /api/v1/orders/{id}/refund`
-- `POST /api/v1/payouts`
+The server does not trust client business math:
 
-Raw protocol mutation routes stay synchronous.
-
-## Merchant semantics
-
-- `/pay/{slug}` is a sandbox payment simulation
-- no customer wallet connect is involved
-- dashboard overview is SDK-anchored and returns `503` if required SDK reads fail
-- operator lease is public to inspect and exclusive for merchant writes
+- purchase price is revalidated against the seeded catalog
+- duplicate purchase is rejected
+- user/app withdraw amounts are capped by current allocation
+- only one asset is allowed per store session
 
 Use this file as orientation only. For concrete request and response bodies, use the embedded reference.

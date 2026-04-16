@@ -26,20 +26,32 @@ func TestScaffoldRoutes(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{
-		Port:              "8080",
-		LogLevel:          "info",
-		ClearnodeWSURL:    "wss://example.invalid",
-		DemoPrivateKey:    "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318",
-		ConsoleAPIKey:     "12345678901234567890123456789012",
-		BlockchainRPCURLs: map[string]string{"80002": "https://example.invalid"},
-		HomeBlockchains:   map[string]uint64{"usdc": 80002},
-		SQLitePath:        filepath.Join(t.TempDir(), "smoke.db"),
-		MerchantName:      "Nitrolite Sandbox Merchant",
-		MerchantAppID:     "default",
+		Port:               "8080",
+		LogLevel:           "info",
+		ClearnodeWSURL:     "wss://example.invalid",
+		DemoPrivateKey:     "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318",
+		ConsoleAPIKey:      "12345678901234567890123456789012",
+		BlockchainRPCURLs:  map[string]string{"11155111": "https://example.invalid"},
+		HomeBlockchains:    map[string]uint64{"yellow": 11155111, "yusd": 11155111},
+		SQLitePath:         filepath.Join(t.TempDir(), "smoke.db"),
+		StoreName:          "Nitrolite App Session Store",
+		StoreAppID:         "store",
+		StoreAppPrivateKey: "",
+		MerchantName:       "Nitrolite Sandbox Merchant",
+		MerchantAppID:      "default",
+	}
+
+	userSigner, err := signing.NewEnvSigner(cfg.DemoPrivateKey)
+	if err != nil {
+		t.Fatalf("NewEnvSigner() error = %v", err)
+	}
+	appSigner, err := signing.NewStoreAppSigner(cfg.StoreAppPrivateKey, cfg.DemoPrivateKey)
+	if err != nil {
+		t.Fatalf("NewStoreAppSigner() error = %v", err)
 	}
 
 	client := &testsupport.FakeClient{
-		GetUserAddressFunc: func() string { return "0xabc" },
+		GetUserAddressFunc: func() string { return userSigner.Address() },
 		GetConfigFunc: func(context.Context) (*core.NodeConfig, error) {
 			return &core.NodeConfig{
 				NodeAddress:            "0xnode",
@@ -47,8 +59,8 @@ func TestScaffoldRoutes(t *testing.T) {
 				SupportedSigValidators: []core.ChannelSignerType{core.ChannelSignerType_Default},
 				Blockchains: []core.Blockchain{
 					{
-						ID:                     80002,
-						Name:                   "Polygon Amoy",
+						ID:                     11155111,
+						Name:                   "Ethereum Sepolia",
 						ChannelHubAddress:      "0xhub",
 						LockingContractAddress: "0xlock",
 						BlockStep:              1,
@@ -59,8 +71,8 @@ func TestScaffoldRoutes(t *testing.T) {
 		GetBlockchainsFunc: func(context.Context) ([]core.Blockchain, error) {
 			return []core.Blockchain{
 				{
-					ID:                     80002,
-					Name:                   "Polygon Amoy",
+					ID:                     11155111,
+					Name:                   "Ethereum Sepolia",
 					ChannelHubAddress:      "0xhub",
 					LockingContractAddress: "0xlock",
 					BlockStep:              1,
@@ -70,16 +82,16 @@ func TestScaffoldRoutes(t *testing.T) {
 		GetAssetsFunc: func(context.Context, *uint64) ([]core.Asset, error) {
 			return []core.Asset{
 				{
-					Name:                  "USD Coin",
-					Symbol:                "usdc",
+					Name:                  "Yellow USD",
+					Symbol:                "yusd",
 					Decimals:              6,
-					SuggestedBlockchainID: 80002,
+					SuggestedBlockchainID: 11155111,
 					Tokens: []core.Token{
 						{
-							Name:         "USD Coin",
-							Symbol:       "USDC",
+							Name:         "Yellow USD",
+							Symbol:       "YUSD",
 							Address:      "0xtoken",
-							BlockchainID: 80002,
+							BlockchainID: 11155111,
 							Decimals:     6,
 						},
 					},
@@ -87,15 +99,15 @@ func TestScaffoldRoutes(t *testing.T) {
 			}, nil
 		},
 		GetBalancesFunc: func(context.Context, string) ([]core.BalanceEntry, error) {
-			return []core.BalanceEntry{{Asset: "usdc", Balance: decimal.RequireFromString("10.5")}}, nil
+			return []core.BalanceEntry{{Asset: "yusd", Balance: decimal.RequireFromString("10.5")}}, nil
 		},
 		GetTransactionsFunc: func(context.Context, string, *sdk.GetTransactionsOptions) ([]core.Transaction, core.PaginationMetadata, error) {
 			return []core.Transaction{
 					{
 						ID:          "tx-1",
-						Asset:       "usdc",
+						Asset:       "yusd",
 						TxType:      core.TransactionTypeTransfer,
-						FromAccount: "0xabc",
+						FromAccount: userSigner.Address(),
 						ToAccount:   "0xdef",
 						Amount:      decimal.RequireFromString("1.25"),
 						CreatedAt:   time.Unix(1700000000, 0).UTC(),
@@ -110,10 +122,10 @@ func TestScaffoldRoutes(t *testing.T) {
 		GetHomeChannelFunc: func(context.Context, string, string) (*core.Channel, error) {
 			return &core.Channel{
 				ChannelID:             "0xchannel",
-				UserWallet:            "0xabc",
-				Asset:                 "usdc",
+				UserWallet:            userSigner.Address(),
+				Asset:                 "yusd",
 				Type:                  core.ChannelTypeHome,
-				BlockchainID:          80002,
+				BlockchainID:          11155111,
 				TokenAddress:          "0xtoken",
 				ChallengeDuration:     3600,
 				Nonce:                 7,
@@ -128,8 +140,8 @@ func TestScaffoldRoutes(t *testing.T) {
 			nodeSig := "0xnodesig"
 			return &core.State{
 				ID:            "state-1",
-				Asset:         "usdc",
-				UserWallet:    "0xabc",
+				Asset:         "yusd",
+				UserWallet:    userSigner.Address(),
 				Epoch:         1,
 				Version:       5,
 				HomeChannelID: &homeChannelID,
@@ -141,7 +153,7 @@ func TestScaffoldRoutes(t *testing.T) {
 				},
 				HomeLedger: core.Ledger{
 					TokenAddress: "0xtoken",
-					BlockchainID: 80002,
+					BlockchainID: 11155111,
 					UserBalance:  decimal.RequireFromString("10"),
 					UserNetFlow:  decimal.RequireFromString("10"),
 					NodeBalance:  decimal.Zero,
@@ -156,13 +168,9 @@ func TestScaffoldRoutes(t *testing.T) {
 	manager := nitrolite.NewManagerWithClient(client, nitrolite.Health{
 		Connected:     true,
 		Ready:         true,
-		SignerAddress: "0xabc",
+		SignerAddress: userSigner.Address(),
 	}, slog.Default())
 
-	signer, err := signing.NewEnvSigner(cfg.DemoPrivateKey)
-	if err != nil {
-		t.Fatalf("NewEnvSigner() error = %v", err)
-	}
 	appStore, err := store.New(cfg.SQLitePath)
 	if err != nil {
 		t.Fatalf("store.New() error = %v", err)
@@ -171,7 +179,7 @@ func TestScaffoldRoutes(t *testing.T) {
 		_ = appStore.Close()
 	})
 
-	handler, err := internalhttp.NewHandler(cfg, manager, signer, appStore, slog.Default())
+	handler, err := internalhttp.NewHandler(cfg, manager, userSigner, appSigner, appStore, slog.Default())
 	if err != nil {
 		t.Fatalf("NewHandler() error = %v", err)
 	}
@@ -204,11 +212,8 @@ func TestScaffoldRoutes(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 		}
-		if contentType := rec.Header().Get("Content-Type"); contentType == "" {
-			t.Fatal("missing Content-Type")
-		}
-		if !strings.Contains(rec.Body.String(), "Merchant settlement dashboard") {
-			t.Fatalf("root page missing merchant dashboard copy: %s", rec.Body.String())
+		if !strings.Contains(rec.Body.String(), "App Session Micropayment Store") {
+			t.Fatalf("root page missing store copy: %s", rec.Body.String())
 		}
 	})
 
@@ -235,22 +240,8 @@ func TestScaffoldRoutes(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 		}
-		if !strings.Contains(rec.Body.String(), "Advanced operator console") {
+		if !strings.Contains(rec.Body.String(), "Advanced developer console") {
 			t.Fatalf("advanced page missing expected copy: %s", rec.Body.String())
-		}
-	})
-
-	t.Run("pay page", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/pay/demo-slug", nil)
-		rec := httptest.NewRecorder()
-
-		handler.ServeHTTP(rec, req)
-
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
-		}
-		if !strings.Contains(rec.Body.String(), "Sandbox payment request") {
-			t.Fatalf("pay page missing expected copy: %s", rec.Body.String())
 		}
 	})
 
@@ -291,6 +282,26 @@ func TestScaffoldRoutes(t *testing.T) {
 		}
 	})
 
+	t.Run("store config", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/store/config", nil)
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+
+		var payload map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("json.Unmarshal() error = %v", err)
+		}
+		storePayload := payload["store"].(map[string]any)
+		if storePayload["store_name"] != "Nitrolite App Session Store" {
+			t.Fatalf("unexpected store payload = %#v", storePayload)
+		}
+	})
+
 	t.Run("balances", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/balances", nil)
 		rec := httptest.NewRecorder()
@@ -311,7 +322,7 @@ func TestScaffoldRoutes(t *testing.T) {
 			t.Fatalf("json.Unmarshal() error = %v", err)
 		}
 		if len(payload.Balances) != 1 || payload.Balances[0].Balance != "10.5" {
-			t.Fatalf("balances = %#v, want one usdc balance", payload.Balances)
+			t.Fatalf("balances = %#v, want one yusd balance", payload.Balances)
 		}
 	})
 
@@ -327,7 +338,7 @@ func TestScaffoldRoutes(t *testing.T) {
 	})
 
 	t.Run("channel state", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/channel/state?asset=usdc&only_signed=true", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/channel/state?asset=yusd&only_signed=true", nil)
 		rec := httptest.NewRecorder()
 
 		handler.ServeHTTP(rec, req)

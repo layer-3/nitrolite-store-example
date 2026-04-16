@@ -8,6 +8,6 @@
 - no direct `os.Getenv` outside `internal/config`
 - no SQL outside `internal/store`
 - no `sdk.Client` usage outside `internal/nitrolite`
-- merchant mutations run through the runner in `internal/service`
+- store business logic lives in `internal/service`
 - table-driven tests where cases > 1
 - update `.codex/STATE.md` after milestone changes
