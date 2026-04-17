@@ -7,6 +7,7 @@ Commands:
 ```bash
 go run ./cmd/server
 env CGO_ENABLED=0 GOCACHE=/tmp/nitrolite-go-example-gocache go test ./...
+docker build -t nitrolite-go-example .
 go vet ./...
 gofmt -w .
 ```

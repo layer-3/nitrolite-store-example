@@ -1,0 +1,11 @@
+.git
+.gitignore
+.env
+.env.local
+.codex
+.claude
+bin
+dist
+coverage.out
+*.test
+data

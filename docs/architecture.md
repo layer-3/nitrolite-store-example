@@ -9,6 +9,14 @@
 - `internal/httpapi` is a thin transport layer with decode -> service -> encode plus raw write auth
 - `web/` is a no-build static UI embedded into the Go binary
 
+## Deployment shape
+
+- local development runs with `go run ./cmd/server`
+- Railway deployment should use the repo `Dockerfile` for deterministic build/start behavior
+- Railway persistence should mount a volume at `/app/data`
+- the Railway service should set `SQLITE_PATH=/app/data/nitrolite-go-example.db`
+- the app remains a single service that serves UI, API, and developer surfaces from the same origin
+
 ## Product surfaces
 
 - `/`

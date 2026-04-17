@@ -42,6 +42,41 @@ Open [http://localhost:8080/](http://localhost:8080/).
 
 If you were previously running an older build of this app, stop that server first. Web assets are embedded into the Go binary, so an older process will keep serving stale UI until restarted.
 
+## Railway deployment
+
+The recommended production-like deployment for this repo is a single Railway service backed by the included `Dockerfile`.
+
+Expected Railway shape:
+
+- one web service for the whole app
+- repo-linked to `main`
+- one attached volume mounted at `/app/data`
+- `SQLITE_PATH=/app/data/nitrolite-go-example.db`
+
+Recommended first-time flow:
+
+1. Link the repo to the target project:
+
+```bash
+railway link --workspace Yellow --project clearnet
+```
+
+2. Add or link the service that will run this repo.
+3. Add a volume and mount it at `/app/data`.
+4. Set the required variables on the service.
+5. Deploy from the repo or run `railway up` from the repo root.
+
+Useful Railway CLI commands:
+
+```bash
+railway volume add --mount-path /app/data
+railway variable set CLEARNODE_WS_URL=... DEMO_PRIVATE_KEY=... CONSOLE_API_KEY=... BLOCKCHAIN_RPC_URLS='{"11155111":"https://..."}' HOME_BLOCKCHAINS='{"yusd":11155111,"yellow":11155111}' SQLITE_PATH=/app/data/nitrolite-go-example.db STORE_NAME="Nitrolite App Session Store" STORE_APP_ID=default
+railway up --service <service-name>
+railway service status --service <service-name>
+```
+
+If Railway cannot fetch the GitHub repo initially, the fallback is a first deploy from the local checkout with `railway up`, then converting the service to repo-linked afterward.
+
 ## Required environment
 
 Required:
@@ -54,7 +89,7 @@ Required:
 
 Optional with defaults:
 
-- `PORT=8080`
+- `PORT=8080` locally; Railway injects `PORT` automatically
 - `LOG_LEVEL=info`
 - `SQLITE_PATH=./data/nitrolite-go-example.db`
 - `STORE_NAME=Nitrolite App Session Store`
@@ -64,6 +99,7 @@ Optional with defaults:
 Runtime assumptions:
 
 - the demo signer wallet must already have sandbox funds
+- for a shared deployment, the signer should be a team-owned funded sandbox key
 - the configured home-channel assets must exist on the node
 - the RPC URLs must support the configured home chains
 
@@ -118,6 +154,10 @@ Default path:
 
 - `./data/nitrolite-go-example.db`
 
+Recommended Railway path:
+
+- `/app/data/nitrolite-go-example.db`
+
 If you are switching from an older build, delete the old local DB first if you want a clean store state:
 
 ```bash
@@ -150,6 +190,7 @@ If store actions fail:
 
 - check `/healthz`
 - confirm the demo wallet has balance in the selected asset
+- on Railway, confirm the volume is attached and `SQLITE_PATH` points at `/app/data/nitrolite-go-example.db`
 - inspect `/advanced` for raw SDK state
 - use `/reference` to inspect the live request/response shapes
 
