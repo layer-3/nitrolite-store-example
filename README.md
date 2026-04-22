@@ -42,6 +42,42 @@ Open [http://localhost:8080/](http://localhost:8080/).
 
 If you were previously running an older build of this app, stop that server first. Web assets are embedded into the Go binary, so an older process will keep serving stale UI until restarted.
 
+## How To Use The Store
+
+The main product surface is `/`. It is a small content store built on top of one Nitrolite app session per asset.
+
+What the main sections mean:
+
+- `Selected asset` chooses which per-asset store session you are using. `YUSD` and `YELLOW` keep separate balances and purchases.
+- `Available balance` is what can still be moved into the store session.
+- `User allocation` is the user-side balance already inside the app session and available for purchases.
+- `Store revenue` is the app-side balance inside the same session after purchases move funds from user to store.
+- `Owned items` is the number of purchased catalog items for the current browser session and asset.
+
+Normal flow:
+
+1. Open `/`
+2. Pick `YUSD` or `YELLOW`
+3. Click `Create or load session`
+4. Enter a deposit amount and click `Deposit into store`
+5. Buy an item from the catalog
+6. Open it from the catalog or `Your library`
+7. Withdraw any remaining balance with `Withdraw from store`
+
+What happens under the hood:
+
+- `Create or load session` creates or reopens one Nitrolite app session for the selected asset.
+- `Deposit into store` submits `{"action":"deposit","amount":"..."}` through the single store mutation endpoint.
+- `Purchase` submits `{"action":"purchase","item_id":"...","price":"..."}` and the server re-checks price and allocation math before co-signing.
+- `Withdraw from store` submits `{"action":"user_withdraw","amount":"..."}` and releases the remaining user allocation.
+- `Reader` only opens content that the current browser-scoped store identity already owns.
+- `Browser activity log` shows the raw request/response trace from the frontend and can be copied for debugging.
+
+Developer surfaces:
+
+- `/reference` is the API explorer for the store endpoints.
+- `/advanced` is the raw protocol console for direct Nitrolite inspection and mutation.
+
 ## Railway deployment
 
 The recommended production-like deployment for this repo is a single Railway service backed by the included `Dockerfile`.
@@ -102,6 +138,7 @@ Runtime assumptions:
 - for a shared deployment, the signer should be a team-owned funded sandbox key
 - the configured home-channel assets must exist on the node
 - the RPC URLs must support the configured home chains
+- `/healthz` reports process health even while the SDK is reconnecting; `/readyz` stays `503` until the Clearnode connection is live
 
 ## Recommended local flow
 

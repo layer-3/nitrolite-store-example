@@ -95,24 +95,35 @@ func NewManagerWithClient(client Client, health Health, logger *slog.Logger) *Ma
 
 // NewSDKManager constructs a real SDK-backed manager.
 func NewSDKManager(ctx context.Context, cfg *config.Config, signer appsigning.Signer, logger *slog.Logger) (*Manager, error) {
-	sdkClient, err := connectSDKClient(ctx, cfg, signer)
-	if err != nil {
-		return nil, err
-	}
-
-	return &Manager{
-		client: sdkClient,
+	manager := &Manager{
 		logger: logger,
 		sleep:  sleepWithContext,
 		reconnect: func(ctx context.Context) (Client, error) {
 			return connectSDKClient(ctx, cfg, signer)
 		},
 		health: Health{
-			Connected:     true,
-			Ready:         true,
-			SignerAddress: sdkClient.GetUserAddress(),
+			Connected:     false,
+			Ready:         false,
+			SignerAddress: signer.Address(),
 		},
-	}, nil
+	}
+
+	sdkClient, err := connectSDKClient(ctx, cfg, signer)
+	if err != nil {
+		if logger != nil {
+			logger.Warn("initial sdk connect failed; manager will retry in background", "error", err)
+		}
+		return manager, nil
+	}
+
+	manager.client = sdkClient
+	manager.health = Health{
+		Connected:     true,
+		Ready:         true,
+		SignerAddress: sdkClient.GetUserAddress(),
+	}
+
+	return manager, nil
 }
 
 func connectSDKClient(ctx context.Context, cfg *config.Config, signer appsigning.Signer) (Client, error) {
@@ -182,8 +193,10 @@ func (m *Manager) Run(ctx context.Context) {
 	for {
 		client := m.Client()
 		if client == nil {
-			<-ctx.Done()
-			return
+			if !m.reconnectUntilConnected(ctx, signerAddress) {
+				return
+			}
+			continue
 		}
 
 		select {
@@ -226,8 +239,8 @@ func (m *Manager) reconnectUntilConnected(ctx context.Context, signerAddress str
 			return true
 		}
 
-		if m.logger != nil && attempt >= 5 {
-			m.logger.Error("reconnect failing", "attempt", attempt, "error", err)
+		if m.logger != nil && (attempt == 1 || attempt%5 == 0) {
+			m.logger.Warn("sdk reconnect failed", "attempt", attempt, "error", err)
 		}
 
 		if !m.sleep(ctx, reconnectBackoff(attempt)) {
