@@ -2,7 +2,7 @@
 .env
 .env.local
 bin/
-dist/
+/dist/
 coverage.out
 *.test
 data/

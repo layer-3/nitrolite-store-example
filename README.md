@@ -1,35 +1,44 @@
 # nitrolite-go-example
 
-Same-binary Go reference app for a Nitrolite-backed **App Session Micropayment Store**.
+Go backend reference app for a Nitrolite-backed **content store** with a **TypeScript + MetaMask** frontend.
 
-The public product surface is a small content store at `/`. A user opens one store session per asset, deposits balance into that app session, buys content instantly, and withdraws what remains. `/reference` and `/advanced` stay available as hidden developer surfaces.
+One Go service serves the built frontend and the store API from the same origin. The shopper experience is intentionally small:
+
+- connect MetaMask
+- add funds
+- buy content
+- read purchased content
+- withdraw remaining balance
+
+Protocol details stay behind the implementation boundary. The main UI does not expose raw Nitrolite or channel-management surfaces.
 
 ## Surfaces
 
-- `/` App Session Micropayment Store
-- `/reference` embedded OpenAPI reference
-- `/advanced` raw protocol/developer console
+- `/` shopper-facing store UI
+- `/healthz` process health
+- `/readyz` Clearnode readiness
 
 ## What This Demonstrates
 
-- one Go binary serving product UI, API, and developer tooling
-- Nitrolite app sessions as the store balance rail
-- a single `POST /api/v1/app-session/submit-state` endpoint that dispatches by `session_data.action`
+- a Go backend that validates, app-signs, and submits frontend-constructed app-session updates
+- a React + Vite frontend that uses MetaMask as the real shopper identity
+- automatic app-session bootstrap after wallet connect
+- exact-payload forwarding: the update the user signs is the update the backend submits
 - instant content gating after successful purchase
-- YUSD and YELLOW catalog pricing from the same seeded catalog
+- YUSD and YELLOW catalog pricing from one seeded catalog
 
-## Current trust model
+## Trust model
 
-This v1 implementation is intentionally simple.
+This refresh is wallet-first.
 
-- the browser gets a long-lived **store browser cookie** as its store identity namespace
-- Nitrolite signing still happens server-side
-- the Go server holds:
-  - the demo/user signer
-  - the store/app signer
-- purchases and library access are isolated per browser cookie, not per external wallet
+- MetaMask is the shopper identity
+- the frontend constructs the full app-session update
+- the shopper signs the update in MetaMask
+- the backend validates the same payload, app-signs it, and submits it
+- the backend does **not** sign as the user
+- channel management is assumed to exist already and is out of scope for this app
 
-This is a pragmatic reference build, not the final non-custodial shape.
+Session keys are intentionally deferred to a later phase.
 
 ## Quickstart
 
@@ -44,39 +53,43 @@ If you were previously running an older build of this app, stop that server firs
 
 ## How To Use The Store
 
-The main product surface is `/`. It is a small content store built on top of one Nitrolite app session per asset.
-
-What the main sections mean:
-
-- `Selected asset` chooses which per-asset store session you are using. `YUSD` and `YELLOW` keep separate balances and purchases.
-- `Available balance` is what can still be moved into the store session.
-- `User allocation` is the user-side balance already inside the app session and available for purchases.
-- `Store revenue` is the app-side balance inside the same session after purchases move funds from user to store.
-- `Owned items` is the number of purchased catalog items for the current browser session and asset.
+The main product surface is `/`.
 
 Normal flow:
 
 1. Open `/`
-2. Pick `YUSD` or `YELLOW`
-3. Click `Create or load session`
-4. Enter a deposit amount and click `Deposit into store`
+2. Connect MetaMask on Sepolia
+3. Wait for the store session to bootstrap automatically
+4. Add funds to the store balance
 5. Buy an item from the catalog
-6. Open it from the catalog or `Your library`
-7. Withdraw any remaining balance with `Withdraw from store`
+6. Open it from `Library`
+7. Withdraw any remaining balance
 
-What happens under the hood:
+The main panels mean:
 
-- `Create or load session` creates or reopens one Nitrolite app session for the selected asset.
-- `Deposit into store` submits `{"action":"deposit","amount":"..."}` through the single store mutation endpoint.
-- `Purchase` submits `{"action":"purchase","item_id":"...","price":"..."}` and the server re-checks price and allocation math before co-signing.
-- `Withdraw from store` submits `{"action":"user_withdraw","amount":"..."}` and releases the remaining user allocation.
-- `Reader` only opens content that the current browser-scoped store identity already owns.
-- `Browser activity log` shows the raw request/response trace from the frontend and can be copied for debugging.
+- `Wallet` shows the connected shopper identity
+- `Available balance` is what can still be committed into the store
+- `Store balance` is the shopper allocation already inside the store session
+- `Catalog` lists seeded content and prices for the selected asset
+- `Library` shows wallet-owned content
+- `Reader` displays purchased content after ownership is confirmed
+- `Browser activity` is a client-side trace for debugging
 
-Developer surfaces:
+## Frontend development
 
-- `/reference` is the API explorer for the store endpoints.
-- `/advanced` is the raw protocol console for direct Nitrolite inspection and mutation.
+The product UI now lives in `frontend/` and is built with React + Vite + TypeScript.
+
+Development shape:
+
+- run the Go API separately
+- run Vite in `frontend/`
+- proxy `/api/*` to the Go server
+
+Production shape:
+
+- build the frontend into `internal/webui/dist`
+- run the Go server
+- the Go server serves the built frontend and API from the same origin
 
 ## Railway deployment
 
@@ -94,13 +107,15 @@ Recommended first-time flow:
 1. Link the repo to the target project:
 
 ```bash
-railway link --workspace Yellow --project clearnet
+railway link --workspace <your-workspace> --project <your-project>
 ```
 
 2. Add or link the service that will run this repo.
 3. Add a volume and mount it at `/app/data`.
 4. Set the required variables on the service.
 5. Deploy from the repo or run `railway up` from the repo root.
+
+If you are deploying inside the Yellow org, use the appropriate internal workspace/project instead of the placeholders above.
 
 Useful Railway CLI commands:
 
@@ -140,44 +155,19 @@ Runtime assumptions:
 - the RPC URLs must support the configured home chains
 - `/healthz` reports process health even while the SDK is reconnecting; `/readyz` stays `503` until the Clearnode connection is live
 
-## Recommended local flow
-
-1. Open `/`
-2. Pick `YUSD` or `YELLOW`
-3. Click `Create or load session`
-4. Deposit into the store session
-5. Purchase an item from the catalog
-6. Open the purchased item in the reader or library
-7. Withdraw any remaining user allocation
-
-For hidden developer-only app revenue withdraws or raw protocol mutations:
-
-1. Unlock writes with `CONSOLE_API_KEY`
-2. Use `/advanced` or submit `app_withdraw` via the store mutation endpoint
-
 ## API shape
 
-Store-first routes:
+Public store routes:
 
-- `GET /api/v1/store/config`
-- `GET /api/v1/catalog`
-- `GET /api/v1/catalog/{id}`
-- `GET /api/v1/store/session?asset=...`
-- `POST /api/v1/store/session/create`
-- `POST /api/v1/app-session/submit-state`
-- `GET /api/v1/purchases`
-- `GET /api/v1/content/{id}`
-- `GET /api/v1/balance?asset=...`
+- `POST /api/store/connect/challenge`
+- `POST /api/store/connect/verify`
+- `GET /api/store/bootstrap?asset=...`
+- `POST /api/store/update`
+- `GET /api/store/content/{id}?asset=...`
+- `GET /healthz`
+- `GET /readyz`
 
-The single store mutation endpoint expects `session_data` JSON. Examples:
-
-```json
-{"action":"deposit","amount":"1.00"}
-{"action":"purchase","item_id":"article-micropayments","price":"0.50"}
-{"action":"user_withdraw","amount":"0.50"}
-```
-
-The server always revalidates catalog price and allocation math before co-signing.
+The backend receives the full frontend-constructed update payload, validates it, app-signs it, and submits the same payload to Clearnode.
 
 ## Persistence
 

@@ -1,0 +1,30 @@
+:root {
+  font-family: 'SF Pro Text', 'Inter', system-ui, sans-serif;
+  color: #1f1b17;
+  background:
+    radial-gradient(circle at top left, rgba(34, 113, 96, 0.16), transparent 30%),
+    radial-gradient(circle at top right, rgba(201, 150, 70, 0.14), transparent 28%),
+    linear-gradient(180deg, #fbf7ef 0%, #f3ecdf 100%);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+}
+
+a {
+  color: inherit;
+}

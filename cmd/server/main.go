@@ -27,18 +27,13 @@ func main() {
 	}
 
 	logger := newLogger(cfg.LogLevel)
-	userSigner, err := signing.NewEnvSigner(cfg.DemoPrivateKey)
-	if err != nil {
-		logger.Error("failed to initialize signer", "error", err)
-		os.Exit(1)
-	}
 	appSigner, err := signing.NewStoreAppSigner(cfg.StoreAppPrivateKey, cfg.DemoPrivateKey)
 	if err != nil {
 		logger.Error("failed to initialize store app signer", "error", err)
 		os.Exit(1)
 	}
 
-	manager, err := nitrolite.NewSDKManager(ctx, cfg, userSigner, logger)
+	manager, err := nitrolite.NewSDKManager(ctx, cfg, appSigner, logger)
 	if err != nil {
 		logger.Error("failed to initialize nitrolite manager", "error", err)
 		os.Exit(1)
@@ -57,7 +52,7 @@ func main() {
 
 	go manager.Run(ctx)
 
-	handler, err := internalhttp.NewHandler(cfg, manager, userSigner, appSigner, appStore, logger)
+	handler, err := internalhttp.NewHandler(cfg, manager, appSigner, appSigner, appStore, logger)
 	if err != nil {
 		logger.Error("failed to build handler", "error", err)
 		os.Exit(1)
@@ -80,7 +75,7 @@ func main() {
 		}
 	}()
 
-	logger.Info("starting server", "addr", srv.Addr, "mode", "store-reference-advanced")
+	logger.Info("starting server", "addr", srv.Addr, "mode", "store-vite-refresh")
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Error("server exited", "error", err)
 		os.Exit(1)
