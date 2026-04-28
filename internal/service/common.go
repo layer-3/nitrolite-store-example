@@ -1,7 +1,7 @@
 package service
 
 import (
-	"github.com/layer-3/nitrolite-go-example/internal/nitrolite"
+	"github.com/layer-3/nitrolite-store-example/internal/nitrolite"
 )
 
 type clientProvider interface {

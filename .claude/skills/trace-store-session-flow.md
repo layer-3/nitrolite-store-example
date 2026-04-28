@@ -2,7 +2,7 @@
 
 Trace:
 - store handler
-- storefront service
+- wallet store service
 - store persistence
 - Nitrolite SDK call chain
 

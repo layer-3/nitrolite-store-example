@@ -5,7 +5,7 @@ Check:
 - asset switching is clear
 - session status is understandable
 - purchase and content-access states are explicit
-- hidden developer surfaces stay out of the main store nav
+- action labels remain `Connect`, `Deposit`, `Withdraw`, and `Purchase`
 
 Output:
 - UI/API mismatches

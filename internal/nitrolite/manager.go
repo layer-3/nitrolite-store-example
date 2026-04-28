@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/layer-3/nitrolite-go-example/internal/config"
-	appsigning "github.com/layer-3/nitrolite-go-example/internal/signing"
+	"github.com/layer-3/nitrolite-store-example/internal/config"
+	appsigning "github.com/layer-3/nitrolite-store-example/internal/signing"
 	"github.com/layer-3/nitrolite/pkg/app"
 	"github.com/layer-3/nitrolite/pkg/core"
 	sdk "github.com/layer-3/nitrolite/sdk/go"

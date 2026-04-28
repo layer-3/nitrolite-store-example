@@ -9,11 +9,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/layer-3/nitrolite-go-example/internal/config"
-	internalhttp "github.com/layer-3/nitrolite-go-example/internal/httpapi"
-	"github.com/layer-3/nitrolite-go-example/internal/nitrolite"
-	"github.com/layer-3/nitrolite-go-example/internal/signing"
-	"github.com/layer-3/nitrolite-go-example/internal/store"
+	"github.com/layer-3/nitrolite-store-example/internal/config"
+	internalhttp "github.com/layer-3/nitrolite-store-example/internal/httpapi"
+	"github.com/layer-3/nitrolite-store-example/internal/nitrolite"
+	"github.com/layer-3/nitrolite-store-example/internal/signing"
+	"github.com/layer-3/nitrolite-store-example/internal/store"
 )
 
 func main() {

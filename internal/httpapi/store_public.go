@@ -2,12 +2,19 @@ package httpapi
 
 import (
 	"net/http"
+	"strings"
 
-	"github.com/layer-3/nitrolite-go-example/internal/service"
+	"github.com/layer-3/nitrolite-store-example/internal/service"
 )
 
-func storeBootstrapHandler(storefront *service.WalletStoreService, auth *storeAuthStore) http.Handler {
-	return requireStoreAuth(auth, func(w http.ResponseWriter, r *http.Request, walletAddress string) {
+func storeBootstrapHandler(storefront *service.WalletStoreService) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		walletAddress := strings.TrimSpace(r.URL.Query().Get("wallet_address"))
+		if walletAddress == "" {
+			writeError(w, http.StatusBadRequest, "invalid_request", "wallet_address is required")
+			return
+		}
+
 		bootstrap, err := storefront.Bootstrap(r.Context(), walletAddress, r.URL.Query().Get("asset"))
 		if err != nil {
 			writeServiceError(w, err)
@@ -17,15 +24,15 @@ func storeBootstrapHandler(storefront *service.WalletStoreService, auth *storeAu
 	})
 }
 
-func storeUpdateHandler(storefront *service.WalletStoreService, auth *storeAuthStore) http.Handler {
-	return requireStoreAuth(auth, func(w http.ResponseWriter, r *http.Request, walletAddress string) {
-		var req service.StoreUpdateRequest
+func storeInitHandler(storefront *service.WalletStoreService) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req service.StoreInitRequest
 		if err := decodeJSON(r, &req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
 
-		bootstrap, err := storefront.SubmitUpdate(r.Context(), walletAddress, req)
+		bootstrap, err := storefront.CreateSession(r.Context(), req)
 		if err != nil {
 			writeServiceError(w, err)
 			return
@@ -34,13 +41,42 @@ func storeUpdateHandler(storefront *service.WalletStoreService, auth *storeAuthS
 	})
 }
 
-func storeContentHandler(storefront *service.WalletStoreService, auth *storeAuthStore) http.Handler {
-	return requireStoreAuth(auth, func(w http.ResponseWriter, r *http.Request, walletAddress string) {
-		item, err := storefront.Content(r.Context(), walletAddress, r.URL.Query().Get("asset"), r.PathValue("id"))
+func storeUpdateHandler(storefront *service.WalletStoreService) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req service.StoreUpdateRequest
+		if err := decodeJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+
+		result, err := storefront.SubmitUpdate(r.Context(), req)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+	})
+}
+
+func storeContentHandler(storefront *service.WalletStoreService) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req service.StoreContentOpenRequest
+		if err := decodeJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+
+		item, err := storefront.Content(r.Context(), r.PathValue("id"), req)
 		if err != nil {
 			writeServiceError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, item)
+	})
+}
+
+func storeContentLegacyHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "content reads require a signed POST to /api/store/content/{id}/open")
 	})
 }

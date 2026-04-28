@@ -7,24 +7,21 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strings"
+	"reflect"
 	"testing"
 
-	"github.com/layer-3/nitrolite-go-example/internal/config"
-	"github.com/layer-3/nitrolite-go-example/internal/nitrolite"
-	"github.com/layer-3/nitrolite-go-example/internal/signing"
-	"github.com/layer-3/nitrolite-go-example/internal/store"
-	"github.com/layer-3/nitrolite-go-example/internal/testsupport"
-	"github.com/layer-3/nitrolite/pkg/app"
+	"github.com/layer-3/nitrolite-store-example/internal/config"
+	"github.com/layer-3/nitrolite-store-example/internal/nitrolite"
+	"github.com/layer-3/nitrolite-store-example/internal/signing"
+	"github.com/layer-3/nitrolite-store-example/internal/store"
+	"github.com/layer-3/nitrolite-store-example/internal/testsupport"
 	"github.com/layer-3/nitrolite/pkg/core"
-	"github.com/layer-3/nitrolite/pkg/sign"
-	sdk "github.com/layer-3/nitrolite/sdk/go"
 	"github.com/shopspring/decimal"
 )
 
 const httpAPITestPrivateKey = "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
 
-func TestStoreBootstrapRequiresWalletConnection(t *testing.T) {
+func TestStoreBootstrapRequiresWalletAddress(t *testing.T) {
 	t.Parallel()
 
 	handler := newTestHandler(t, &testsupport.FakeClient{})
@@ -33,22 +30,23 @@ func TestStoreBootstrapRequiresWalletConnection(t *testing.T) {
 
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusUnauthorized, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
 
 	var payload errorEnvelope
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if payload.Error.Code != "unauthorized" {
-		t.Fatalf("error code = %q, want unauthorized", payload.Error.Code)
+	if payload.Error.Code != "invalid_request" {
+		t.Fatalf("error code = %q, want invalid_request", payload.Error.Code)
 	}
 }
 
-func TestStoreConnectVerifyAndBootstrap(t *testing.T) {
+func TestStoreBootstrapWithWalletAddress(t *testing.T) {
 	t.Parallel()
 
+	walletAddress := "0x1111111111111111111111111111111111111111"
 	handler := newTestHandler(t, &testsupport.FakeClient{
 		GetBalancesFunc: func(context.Context, string) ([]core.BalanceEntry, error) {
 			return []core.BalanceEntry{
@@ -56,15 +54,9 @@ func TestStoreConnectVerifyAndBootstrap(t *testing.T) {
 				{Asset: "yellow", Balance: decimal.RequireFromString("3")},
 			}, nil
 		},
-		GetAppSessionsFunc: func(context.Context, *sdk.GetAppSessionsOptions) ([]app.AppSessionInfoV1, core.PaginationMetadata, error) {
-			return nil, core.PaginationMetadata{}, nil
-		},
 	})
-	userSigner := mustUserSigner(t)
-	authCookie := connectWallet(t, handler, userSigner)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/store/bootstrap?asset=yusd", nil)
-	req.AddCookie(authCookie)
+	req := httptest.NewRequest(http.MethodGet, "/api/store/bootstrap?asset=yusd&wallet_address="+walletAddress, nil)
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
@@ -74,14 +66,10 @@ func TestStoreConnectVerifyAndBootstrap(t *testing.T) {
 	}
 
 	var payload struct {
-		StoreName        string `json:"store_name"`
-		AppID            string `json:"app_id"`
-		AppSigner        string `json:"app_signer"`
-		WalletAddress    string `json:"wallet_address"`
-		SelectedAsset    string `json:"selected_asset"`
-		DefaultAsset     string `json:"default_asset"`
+		WalletAddress    string   `json:"wallet_address"`
+		SelectedAsset    string   `json:"selected_asset"`
 		SupportedAssets  []string `json:"supported_assets"`
-		AvailableBalance string `json:"available_balance"`
+		AvailableBalance string   `json:"available_balance"`
 		Catalog          []struct {
 			ID string `json:"id"`
 		} `json:"catalog"`
@@ -95,11 +83,14 @@ func TestStoreConnectVerifyAndBootstrap(t *testing.T) {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 
-	if payload.WalletAddress != userSigner.Address() {
-		t.Fatalf("wallet_address = %q, want %q", payload.WalletAddress, userSigner.Address())
+	if payload.WalletAddress != walletAddress {
+		t.Fatalf("wallet_address = %q, want %q", payload.WalletAddress, walletAddress)
 	}
 	if payload.SelectedAsset != "yusd" {
 		t.Fatalf("selected_asset = %q, want yusd", payload.SelectedAsset)
+	}
+	if !reflect.DeepEqual(payload.SupportedAssets, []string{"yusd", "yellow"}) {
+		t.Fatalf("supported_assets = %#v, want yusd/yellow", payload.SupportedAssets)
 	}
 	if payload.AvailableBalance != "7" {
 		t.Fatalf("available_balance = %q, want 7", payload.AvailableBalance)
@@ -113,72 +104,70 @@ func TestStoreConnectVerifyAndBootstrap(t *testing.T) {
 	if len(payload.Catalog) == 0 {
 		t.Fatal("expected seeded catalog entries")
 	}
-	if len(payload.SupportedAssets) == 0 {
-		t.Fatal("expected supported_assets")
-	}
 }
 
-func TestStoreConnectVerifyRejectsWrongSignature(t *testing.T) {
+func TestStoreBootstrapWithYellowAsset(t *testing.T) {
 	t.Parallel()
 
-	handler := newTestHandler(t, &testsupport.FakeClient{})
-	userSigner := mustUserSigner(t)
-	challenge := requestChallenge(t, handler, userSigner.Address())
-	wrongSigner, err := signing.NewStoreAppSigner("", httpAPITestPrivateKey)
-	if err != nil {
-		t.Fatalf("NewStoreAppSigner() error = %v", err)
-	}
-
-	verifyReq := httptest.NewRequest(http.MethodPost, "/api/store/connect/verify", strings.NewReader(mustMarshalJSON(t, map[string]string{
-		"challenge_id":   challenge.ChallengeID,
-		"wallet_address": userSigner.Address(),
-		"signature":      signChallengeMessage(t, wrongSigner, challenge.Message),
-	})))
-	verifyRec := httptest.NewRecorder()
-	handler.ServeHTTP(verifyRec, verifyReq)
-
-	if verifyRec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d body=%s", verifyRec.Code, http.StatusUnauthorized, verifyRec.Body.String())
-	}
-}
-
-func TestStoreContentRequiresOwnership(t *testing.T) {
-	t.Parallel()
-
+	walletAddress := "0x1111111111111111111111111111111111111111"
 	handler := newTestHandler(t, &testsupport.FakeClient{
 		GetBalancesFunc: func(context.Context, string) ([]core.BalanceEntry, error) {
-			return []core.BalanceEntry{{Asset: "yusd", Balance: decimal.RequireFromString("7")}}, nil
+			return []core.BalanceEntry{
+				{Asset: "yusd", Balance: decimal.RequireFromString("7")},
+				{Asset: "yellow", Balance: decimal.RequireFromString("3")},
+			}, nil
 		},
 	})
-	authCookie := connectWallet(t, handler, mustUserSigner(t))
 
-	req := httptest.NewRequest(http.MethodGet, "/api/store/content/article-micropayments?asset=yusd", nil)
-	req.AddCookie(authCookie)
+	req := httptest.NewRequest(http.MethodGet, "/api/store/bootstrap?asset=yellow&wallet_address="+walletAddress, nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusConflict, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload struct {
+		SelectedAsset    string `json:"selected_asset"`
+		AvailableBalance string `json:"available_balance"`
+		Catalog          []struct {
+			ID     string            `json:"id"`
+			Prices map[string]string `json:"prices"`
+		} `json:"catalog"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if payload.SelectedAsset != "yellow" {
+		t.Fatalf("selected_asset = %q, want yellow", payload.SelectedAsset)
+	}
+	if payload.AvailableBalance != "3" {
+		t.Fatalf("available_balance = %q, want 3", payload.AvailableBalance)
+	}
+	if len(payload.Catalog) == 0 || payload.Catalog[0].Prices["yellow"] != "1.35" {
+		t.Fatalf("unexpected yellow catalog = %#v", payload.Catalog)
+	}
+}
+
+func TestStoreContentLegacyGetDisabled(t *testing.T) {
+	t.Parallel()
+
+	walletAddress := "0x1111111111111111111111111111111111111111"
+	handler := newTestHandler(t, &testsupport.FakeClient{})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/store/content/1?asset=yusd&wallet_address="+walletAddress, nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusMethodNotAllowed, rec.Body.String())
 	}
 }
 
 func TestStoreBootstrapReturnsServiceUnavailableWhenDisconnected(t *testing.T) {
 	t.Parallel()
 
-	cfg := &config.Config{
-		Port:               "8080",
-		LogLevel:           "info",
-		ClearnodeWSURL:     "wss://example.invalid",
-		DemoPrivateKey:     httpAPITestPrivateKey,
-		ConsoleAPIKey:      "12345678901234567890123456789012",
-		BlockchainRPCURLs:  map[string]string{"11155111": "https://example.invalid"},
-		HomeBlockchains:    map[string]uint64{"yellow": 11155111, "yusd": 11155111},
-		SQLitePath:         filepath.Join(t.TempDir(), "test.db"),
-		StoreName:          "Nitrolite App Session Store",
-		StoreAppID:         "store",
-		StoreAppPrivateKey: "",
-	}
-	userSigner := mustUserSigner(t)
+	cfg := testConfig(t)
 	appSigner, err := signing.NewStoreAppSigner("", httpAPITestPrivateKey)
 	if err != nil {
 		t.Fatalf("NewStoreAppSigner() error = %v", err)
@@ -195,14 +184,12 @@ func TestStoreBootstrapReturnsServiceUnavailableWhenDisconnected(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = appStore.Close() })
 
-	handler, err := NewHandler(cfg, manager, userSigner, appSigner, appStore, slog.Default())
+	handler, err := NewHandler(cfg, manager, appSigner, appSigner, appStore, slog.Default())
 	if err != nil {
 		t.Fatalf("NewHandler() error = %v", err)
 	}
-	authCookie := connectWallet(t, handler, userSigner)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/store/bootstrap?asset=yusd", nil)
-	req.AddCookie(authCookie)
+	req := httptest.NewRequest(http.MethodGet, "/api/store/bootstrap?asset=yusd&wallet_address=0x1111111111111111111111111111111111111111", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -211,30 +198,21 @@ func TestStoreBootstrapReturnsServiceUnavailableWhenDisconnected(t *testing.T) {
 	}
 }
 
+func newTestHandler(t *testing.T, client *testsupport.FakeClient) http.Handler {
+	t.Helper()
+	return newTestHarness(t, client).handler
+}
+
 type testHarness struct {
-	handler    http.Handler
-	store      *store.Store
-	userSigner signing.Signer
-	appSigner  signing.Signer
+	handler   http.Handler
+	store     *store.Store
+	appSigner signing.Signer
 }
 
 func newTestHarness(t *testing.T, client *testsupport.FakeClient) testHarness {
 	t.Helper()
 
-	cfg := &config.Config{
-		Port:               "8080",
-		LogLevel:           "info",
-		ClearnodeWSURL:     "wss://example.invalid",
-		DemoPrivateKey:     httpAPITestPrivateKey,
-		ConsoleAPIKey:      "12345678901234567890123456789012",
-		BlockchainRPCURLs:  map[string]string{"11155111": "https://example.invalid"},
-		HomeBlockchains:    map[string]uint64{"yellow": 11155111, "yusd": 11155111},
-		SQLitePath:         filepath.Join(t.TempDir(), "test.db"),
-		StoreName:          "Nitrolite App Session Store",
-		StoreAppID:         "store",
-		StoreAppPrivateKey: "",
-	}
-	userSigner := mustUserSigner(t)
+	cfg := testConfig(t)
 	appSigner, err := signing.NewStoreAppSigner("", httpAPITestPrivateKey)
 	if err != nil {
 		t.Fatalf("NewStoreAppSigner() error = %v", err)
@@ -251,112 +229,26 @@ func newTestHarness(t *testing.T, client *testsupport.FakeClient) testHarness {
 	}
 	t.Cleanup(func() { _ = appStore.Close() })
 
-	handler, err := NewHandler(cfg, manager, userSigner, appSigner, appStore, slog.Default())
+	handler, err := NewHandler(cfg, manager, appSigner, appSigner, appStore, slog.Default())
 	if err != nil {
 		t.Fatalf("NewHandler() error = %v", err)
 	}
 
-	return testHarness{handler: handler, store: appStore, userSigner: userSigner, appSigner: appSigner}
+	return testHarness{handler: handler, store: appStore, appSigner: appSigner}
 }
 
-func newTestHandler(t *testing.T, client *testsupport.FakeClient) http.Handler {
+func testConfig(t *testing.T) *config.Config {
 	t.Helper()
-	return newTestHarness(t, client).handler
-}
-
-type storeChallengeResponse struct {
-	ChallengeID string `json:"challenge_id"`
-	Message     string `json:"message"`
-}
-
-func requestChallenge(t *testing.T, handler http.Handler, walletAddress string) storeChallengeResponse {
-	t.Helper()
-
-	req := httptest.NewRequest(http.MethodPost, "/api/store/connect/challenge", strings.NewReader(mustMarshalJSON(t, map[string]string{
-		"wallet_address": walletAddress,
-	})))
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("challenge status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	return &config.Config{
+		Port:               "8080",
+		LogLevel:           "info",
+		ClearnodeWSURL:     "wss://example.invalid",
+		DemoPrivateKey:     httpAPITestPrivateKey,
+		BlockchainRPCURLs:  map[string]string{"11155111": "https://example.invalid"},
+		HomeBlockchains:    map[string]uint64{"yellow": 11155111, "yusd": 11155111},
+		SQLitePath:         filepath.Join(t.TempDir(), "test.db"),
+		StoreName:          "Nitrolite App Session Store",
+		StoreAppID:         "store",
+		StoreAppPrivateKey: "",
 	}
-
-	var payload storeChallengeResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-	if payload.ChallengeID == "" || payload.Message == "" {
-		t.Fatalf("unexpected challenge payload = %#v", payload)
-	}
-	return payload
-}
-
-func connectWallet(t *testing.T, handler http.Handler, signer signing.Signer) *http.Cookie {
-	t.Helper()
-
-	challenge := requestChallenge(t, handler, signer.Address())
-	req := httptest.NewRequest(http.MethodPost, "/api/store/connect/verify", strings.NewReader(mustMarshalJSON(t, map[string]string{
-		"challenge_id":   challenge.ChallengeID,
-		"wallet_address": signer.Address(),
-		"signature":      signChallengeMessage(t, signer, challenge.Message),
-	})))
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("verify status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-
-	cookie := storeAuthCookie(t, rec.Result().Cookies())
-	if cookie.Value == "" {
-		t.Fatal("expected auth cookie value")
-	}
-	return cookie
-}
-
-func mustUserSigner(t *testing.T) signing.Signer {
-	t.Helper()
-
-	signer, err := signing.NewEnvSigner(httpAPITestPrivateKey)
-	if err != nil {
-		t.Fatalf("NewEnvSigner() error = %v", err)
-	}
-	return signer
-}
-
-func signChallengeMessage(t *testing.T, signer signing.Signer, message string) string {
-	t.Helper()
-
-	msgSigner, err := sign.NewEthereumMsgSignerFromRaw(signer.TxSigner())
-	if err != nil {
-		t.Fatalf("NewEthereumMsgSignerFromRaw() error = %v", err)
-	}
-	signature, err := msgSigner.Sign([]byte(message))
-	if err != nil {
-		t.Fatalf("Sign() error = %v", err)
-	}
-	return signature.String()
-}
-
-func mustMarshalJSON(t *testing.T, payload any) string {
-	t.Helper()
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatalf("json.Marshal() error = %v", err)
-	}
-	return string(body)
-}
-
-func storeAuthCookie(t *testing.T, cookies []*http.Cookie) *http.Cookie {
-	t.Helper()
-
-	for _, cookie := range cookies {
-		if cookie.Name == storeAuthSessionCookieName {
-			return cookie
-		}
-	}
-	t.Fatal("expected store auth cookie")
-	return nil
 }

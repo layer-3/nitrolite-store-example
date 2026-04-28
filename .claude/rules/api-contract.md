@@ -1,24 +1,24 @@
 # API Contract Rules
 
-- prefix all API routes with `/api/v1`
+- active API routes are only:
+  - `GET /api/store/bootstrap`
+  - `POST /api/store/init`
+  - `POST /api/store/update`
+  - `POST /api/store/content/{id}/open`
 - amounts are decimal strings, never floats
 - error envelope:
 ```json
 {"error":{"code":"snake_case","message":"lowercase message"}}
 ```
-- raw mutation routes in `/advanced` use `requireWriteAccess()`
-- `requireWriteAccess()` accepts:
-  - bearer key
-  - unlocked write-session cookie
-- store product routes are browser-cookie scoped and do not require write unlock for normal use
-- `POST /api/v1/app-session/submit-state` is the single store mutation endpoint
-- `POST /api/v1/app-session/submit-state` must dispatch from `session_data.action`
+- store product routes are wallet-signature scoped
+- `POST /api/store/init` verifies `packCreateAppSessionRequestV1(definition, session_data)`
+- `POST /api/store/update` verifies `packAppStateUpdateV1(app_state_update)`
+- `POST /api/store/update` dispatches from `app_state_update.intent`
+- `POST /api/store/content/{id}/open` verifies a MetaMask-signed `open_content` proof before returning purchased content
 - supported public actions are:
   - `deposit`
   - `purchase`
-  - `user_withdraw`
-- hidden developer-only action:
-  - `app_withdraw`
-  - only allowed when write access is present
+  - `withdraw`
 - server must never trust client purchase price or allocation math
-- one browser-scoped store session per asset
+- supported demo assets are `yusd` and `yellow`
+- one wallet-scoped store session per supported asset
