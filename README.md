@@ -21,7 +21,7 @@ The shopper flow is intentionally narrow:
 - `GET /api/store/bootstrap`
 - `POST /api/store/init`
 - `POST /api/store/update`
-- `POST /api/store/content/{id}/open`
+- `GET /api/store/content/{id}`
 
 ## Trust Model
 
@@ -31,6 +31,7 @@ The shopper flow is intentionally narrow:
 - The backend verifies the exact signed payload before adding the store app signature.
 - The backend never signs as the shopper.
 - Store authorization is based on app-session signatures, not login cookies.
+- This is not a production-ready authorization model: content reads use a public example-app gate keyed by wallet, item, and submitted purchase status, so production apps should add an authenticated read session, signed read proof, or equivalent boundary before serving confidential content.
 
 ## Required Flows
 
@@ -52,7 +53,7 @@ The shopper flow is intentionally narrow:
 1. User enters a YUSD amount and presses `Deposit`.
 2. Frontend uses cached bootstrap data or refreshes `GET /api/store/bootstrap`.
 3. Frontend constructs `AppStateUpdateV1` with `AppStateUpdateIntent.Deposit`.
-4. `sessionData` is `{"intent":"deposit"}`.
+4. `sessionData` is `{"intent":"user_deposit"}`.
 5. Frontend encodes with `packAppStateUpdateV1`.
 6. MetaMask signs the encoded payload.
 7. Frontend calls `POST /api/store/update`.
@@ -65,7 +66,7 @@ The shopper flow is intentionally narrow:
 
 1. User enters a YUSD amount and presses `Withdraw`.
 2. Frontend constructs `AppStateUpdateV1` with `AppStateUpdateIntent.Withdraw`.
-3. `sessionData` is `{"intent":"withdraw"}`.
+3. `sessionData` is `{"intent":"user_withdraw"}`.
 4. Frontend signs with MetaMask and calls `POST /api/store/update`.
 5. Backend verifies, app-signs, submits with `sdkClient.SubmitAppState`, and returns refreshed bootstrap data.
 
@@ -85,10 +86,9 @@ The source story names `submitAppSessionDeposit` in the purchase step as well. T
 ### Open Purchased Content
 
 1. User chooses an owned library item and presses `Open`.
-2. Frontend builds a read proof with domain `nitrolite-store-example`, version `1`, action `open_content`, wallet address, selected asset, app session id, item id, and `issued_at`.
-3. MetaMask signs the read proof.
-4. Frontend calls `POST /api/store/content/{id}/open`.
-5. Backend verifies the signature, 5-minute timestamp window, wallet session, asset, item id, and submitted purchase before returning content.
+2. Frontend calls `GET /api/store/content/{id}?wallet_address=...&asset=...`.
+3. Backend checks the wallet session, asset, item id, and submitted purchase before returning content.
+4. This read path is intentionally public for demo ergonomics and should not be used as-is for confidential production content.
 
 ## Quickstart
 

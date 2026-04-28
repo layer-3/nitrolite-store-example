@@ -289,7 +289,7 @@ func TestWalletStoreServiceSubmitAppStateForwardsExactPayload(t *testing.T) {
 			Nonce:  1,
 		},
 		Version:     1,
-		SessionData: `{"intent":"deposit"}`,
+		SessionData: `{"intent":"user_deposit"}`,
 		Allocations: []app.AppAllocationV1{
 			{Participant: userSigner.Address(), Asset: "yusd", Amount: decimal.RequireFromString("1.0")},
 			{Participant: appSigner.Address(), Asset: "yusd", Amount: decimal.Zero},
@@ -321,7 +321,7 @@ func TestWalletStoreServiceSubmitAppStateForwardsExactPayload(t *testing.T) {
 			{Participant: userSigner.Address(), Asset: "yusd", Amount: decimal.RequireFromString("0.5")},
 			{Participant: appSigner.Address(), Asset: "yusd", Amount: decimal.Zero},
 		},
-		SessionData: `{"intent":"withdraw","amount":"0.50"}`,
+		SessionData: `{"intent":"user_withdraw","amount":"0.50"}`,
 	}
 	userSig, err := signAppStateUpdate(update, userSigner)
 	if err != nil {
@@ -403,7 +403,7 @@ func TestWalletStoreServiceSubmitWithdrawAcceptsIntentOnlySessionData(t *testing
 			Nonce:  1,
 		},
 		Version:     2,
-		SessionData: `{"intent":"deposit"}`,
+		SessionData: `{"intent":"user_deposit"}`,
 		Allocations: []app.AppAllocationV1{
 			{Participant: userSigner.Address(), Asset: "yusd", Amount: decimal.RequireFromString("1.0")},
 		},
@@ -434,7 +434,7 @@ func TestWalletStoreServiceSubmitWithdrawAcceptsIntentOnlySessionData(t *testing
 			{Participant: userSigner.Address(), Asset: "yusd", Amount: decimal.RequireFromString("0.5")},
 			{Participant: appSigner.Address(), Asset: "yusd", Amount: decimal.Zero},
 		},
-		SessionData: `{"intent":"withdraw"}`,
+		SessionData: `{"intent":"user_withdraw"}`,
 	}
 	userSig, err := signAppStateUpdate(update, userSigner)
 	if err != nil {
@@ -489,7 +489,7 @@ func TestWalletStoreServiceRejectsStaleUpdateVersion(t *testing.T) {
 			Nonce:  1,
 		},
 		Version:     2,
-		SessionData: `{"intent":"deposit"}`,
+		SessionData: `{"intent":"user_deposit"}`,
 		Allocations: []app.AppAllocationV1{
 			{Participant: userSigner.Address(), Asset: "yusd", Amount: decimal.RequireFromString("1.0")},
 			{Participant: appSigner.Address(), Asset: "yusd", Amount: decimal.Zero},
@@ -521,7 +521,7 @@ func TestWalletStoreServiceRejectsStaleUpdateVersion(t *testing.T) {
 			{Participant: userSigner.Address(), Asset: "yusd", Amount: decimal.RequireFromString("2.0")},
 			{Participant: appSigner.Address(), Asset: "yusd", Amount: decimal.Zero},
 		},
-		SessionData: `{"intent":"deposit"}`,
+		SessionData: `{"intent":"user_deposit"}`,
 	}
 	userSig, err := signAppStateUpdate(update, userSigner)
 	if err != nil {
@@ -616,7 +616,7 @@ func TestWalletStoreServiceSubmitDepositAcceptsInitialEmptyAllocations(t *testin
 			{Participant: userSigner.Address(), Asset: "yusd", Amount: decimal.RequireFromString("1.0")},
 			{Participant: appSigner.Address(), Asset: "yusd", Amount: decimal.Zero},
 		},
-		SessionData: `{"intent":"deposit"}`,
+		SessionData: `{"intent":"user_deposit"}`,
 	}
 	userSig, err := signAppStateUpdate(update, userSigner)
 	if err != nil {
@@ -641,7 +641,7 @@ func TestWalletStoreServiceSubmitDepositAcceptsInitialEmptyAllocations(t *testin
 	if err != nil {
 		t.Fatalf("SubmitUpdate() error = %v", err)
 	}
-	if resp.Status != "signed" || resp.Intent != string(StoreIntentDeposit) || resp.AppSignature == "" {
+	if resp.Status != "signed" || resp.Intent != string(StoreIntentUserDeposit) || resp.AppSignature == "" {
 		t.Fatalf("unexpected response = %#v", resp)
 	}
 }
@@ -682,7 +682,7 @@ func TestWalletStoreServiceSubmitPurchaseAcceptsNormalizedPriceString(t *testing
 			Nonce:  1,
 		},
 		Version:     1,
-		SessionData: `{"intent":"deposit"}`,
+		SessionData: `{"intent":"user_deposit"}`,
 		Allocations: []app.AppAllocationV1{
 			{Participant: userSigner.Address(), Asset: "yusd", Amount: decimal.RequireFromString("1.0")},
 			{Participant: appSigner.Address(), Asset: "yusd", Amount: decimal.Zero},
@@ -752,7 +752,7 @@ func TestWalletStoreServiceSubmitPurchaseAcceptsNormalizedPriceString(t *testing
 	}
 }
 
-func TestWalletStoreServiceContentRequiresSignedRead(t *testing.T) {
+func TestWalletStoreServiceContentUsesPublicSubmittedPurchaseGate(t *testing.T) {
 	t.Parallel()
 
 	userSigner := mustTestSigner(t)
@@ -812,38 +812,16 @@ func TestWalletStoreServiceContentRequiresSignedRead(t *testing.T) {
 		t.Fatalf("MarkWalletPurchaseSubmitted() error = %v", err)
 	}
 
-	proof := StoreContentReadProof{
-		Domain:        "nitrolite-store-example",
-		Version:       "1",
-		Action:        "open_content",
-		WalletAddress: userSigner.Address(),
-		Asset:         "yusd",
-		AppSessionID:  currentSession.AppSessionID,
-		ItemID:        "1",
-		IssuedAt:      now.Format(time.RFC3339Nano),
+	if _, err := service.Content(context.Background(), "1", StoreContentRequest{Asset: "yusd"}); err == nil {
+		t.Fatal("Content() without wallet succeeded")
 	}
 
-	if _, err := service.Content(context.Background(), "1", StoreContentOpenRequest{ContentRequest: proof}); err == nil {
-		t.Fatal("Content() without signature succeeded")
+	otherWallet := mustSignerFromKey(t, serviceTestPrivateKey).Address()
+	if _, err := service.Content(context.Background(), "1", StoreContentRequest{WalletAddress: otherWallet, Asset: "yusd"}); err == nil {
+		t.Fatal("Content() for wallet without store session succeeded")
 	}
 
-	wrongSigner := mustSignerFromKey(t, serviceTestPrivateKey)
-	wrongSig := signContentReadRequest(t, proof, wrongSigner)
-	if _, err := service.Content(context.Background(), "1", StoreContentOpenRequest{ContentRequest: proof, UserSignature: wrongSig}); err == nil {
-		t.Fatal("Content() with wrong signer succeeded")
-	}
-
-	staleProof := proof
-	staleProof.IssuedAt = now.Add(-6 * time.Minute).Format(time.RFC3339Nano)
-	staleSig := signContentReadRequest(t, staleProof, userSigner)
-	if _, err := service.Content(context.Background(), "1", StoreContentOpenRequest{ContentRequest: staleProof, UserSignature: staleSig}); err == nil {
-		t.Fatal("Content() with stale proof succeeded")
-	}
-
-	item, err := service.Content(context.Background(), "1", StoreContentOpenRequest{
-		ContentRequest: proof,
-		UserSignature:  signContentReadRequest(t, proof, userSigner),
-	})
+	item, err := service.Content(context.Background(), "1", StoreContentRequest{WalletAddress: userSigner.Address(), Asset: "yusd"})
 	if err != nil {
 		t.Fatalf("Content() error = %v", err)
 	}
@@ -852,7 +830,7 @@ func TestWalletStoreServiceContentRequiresSignedRead(t *testing.T) {
 	}
 }
 
-func TestWalletStoreServiceYellowPurchaseAndSignedRead(t *testing.T) {
+func TestWalletStoreServiceYellowPurchaseAndPublicRead(t *testing.T) {
 	t.Parallel()
 
 	userSigner := mustTestSigner(t)
@@ -870,7 +848,7 @@ func TestWalletStoreServiceYellowPurchaseAndSignedRead(t *testing.T) {
 			Nonce:  1,
 		},
 		Version:     1,
-		SessionData: `{"intent":"deposit"}`,
+		SessionData: `{"intent":"user_deposit"}`,
 		Allocations: []app.AppAllocationV1{
 			{Participant: userSigner.Address(), Asset: "yellow", Amount: decimal.RequireFromString("2.0")},
 			{Participant: appSigner.Address(), Asset: "yellow", Amount: decimal.Zero},
@@ -938,20 +916,7 @@ func TestWalletStoreServiceYellowPurchaseAndSignedRead(t *testing.T) {
 		t.Fatalf("unexpected yellow purchase response = %#v", resp)
 	}
 
-	proof := StoreContentReadProof{
-		Domain:        "nitrolite-store-example",
-		Version:       "1",
-		Action:        "open_content",
-		WalletAddress: userSigner.Address(),
-		Asset:         "yellow",
-		AppSessionID:  currentSession.AppSessionID,
-		ItemID:        "1",
-		IssuedAt:      now.Format(time.RFC3339Nano),
-	}
-	item, err := service.Content(context.Background(), "1", StoreContentOpenRequest{
-		ContentRequest: proof,
-		UserSignature:  signContentReadRequest(t, proof, userSigner),
-	})
+	item, err := service.Content(context.Background(), "1", StoreContentRequest{WalletAddress: userSigner.Address(), Asset: "yellow"})
 	if err != nil {
 		t.Fatalf("Content() yellow error = %v", err)
 	}
@@ -1002,20 +967,7 @@ func TestWalletStoreServiceContentRejectsUnpurchasedItem(t *testing.T) {
 		t.Fatalf("UpsertWalletSession() error = %v", err)
 	}
 
-	proof := StoreContentReadProof{
-		Domain:        "nitrolite-store-example",
-		Version:       "1",
-		Action:        "open_content",
-		WalletAddress: userSigner.Address(),
-		Asset:         "yusd",
-		AppSessionID:  currentSession.AppSessionID,
-		ItemID:        "1",
-		IssuedAt:      now.Format(time.RFC3339Nano),
-	}
-	if _, err := service.Content(context.Background(), "1", StoreContentOpenRequest{
-		ContentRequest: proof,
-		UserSignature:  signContentReadRequest(t, proof, userSigner),
-	}); err == nil {
+	if _, err := service.Content(context.Background(), "1", StoreContentRequest{WalletAddress: userSigner.Address(), Asset: "yusd"}); err == nil {
 		t.Fatal("Content() succeeded for unpurchased item")
 	}
 }
@@ -1056,7 +1008,7 @@ func TestWalletStoreServiceBootstrapReconcilesPendingPurchase(t *testing.T) {
 		Version:        1,
 		UserAllocation: "1",
 		AppAllocation:  "0",
-		SessionData:    `{"intent":"deposit"}`,
+		SessionData:    `{"intent":"user_deposit"}`,
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}); err != nil {
@@ -1105,7 +1057,7 @@ func TestWalletStoreServiceSubmitPurchaseFailureDoesNotUnlockAndCanRetry(t *test
 			Nonce:  1,
 		},
 		Version:     1,
-		SessionData: `{"intent":"deposit"}`,
+		SessionData: `{"intent":"user_deposit"}`,
 		Allocations: []app.AppAllocationV1{
 			{Participant: userSigner.Address(), Asset: "yusd", Amount: decimal.RequireFromString("1.0")},
 			{Participant: appSigner.Address(), Asset: "yusd", Amount: decimal.Zero},
@@ -1186,7 +1138,7 @@ func TestWalletStoreServiceDuplicateSubmittedPurchaseRejected(t *testing.T) {
 			Nonce:  1,
 		},
 		Version:     1,
-		SessionData: `{"intent":"deposit"}`,
+		SessionData: `{"intent":"user_deposit"}`,
 		Allocations: []app.AppAllocationV1{
 			{Participant: userSigner.Address(), Asset: "yusd", Amount: decimal.RequireFromString("1.0")},
 			{Participant: appSigner.Address(), Asset: "yusd", Amount: decimal.Zero},
@@ -1322,20 +1274,6 @@ func newWalletStoreServiceForTest(t *testing.T, userSigner appsigning.Signer, ap
 	service := NewWalletStoreService(manager, appStore, appSigner, "Nitrolite App Session Store", "store", map[string]uint64{"yusd": 11155111, "yellow": 11155111}, "wss://example.invalid")
 	_ = userSigner
 	return service, appStore
-}
-
-func signContentReadRequest(t *testing.T, proof StoreContentReadProof, signer appsigning.Signer) string {
-	t.Helper()
-
-	signerImpl, err := newAppSessionWalletSigner(signer)
-	if err != nil {
-		t.Fatalf("newAppSessionWalletSigner() error = %v", err)
-	}
-	signature, err := signerImpl.Sign(contentReadPayloadV1(proof))
-	if err != nil {
-		t.Fatalf("content read sign error = %v", err)
-	}
-	return signature.String()
 }
 
 func signedPurchaseUpdate(t *testing.T, userSigner appsigning.Signer, appSigner appsigning.Signer, currentSession app.AppSessionInfoV1) (app.AppStateUpdateV1, rpc.AppStateUpdateV1, string) {

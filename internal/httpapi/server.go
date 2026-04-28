@@ -27,8 +27,8 @@ func NewHandler(cfg *config.Config, manager *nitrolite.Manager, _ signing.Signer
 	mux.Handle("GET /api/store/bootstrap", storeBootstrapHandler(storefront))
 	mux.Handle("POST /api/store/init", storeInitHandler(storefront))
 	mux.Handle("POST /api/store/update", storeUpdateHandler(storefront))
-	mux.Handle("GET /api/store/content/{id}", storeContentLegacyHandler())
-	mux.Handle("POST /api/store/content/{id}/open", storeContentHandler(storefront))
+	mux.Handle("GET /api/store/content/{id}", storeContentHandler(storefront))
+	mux.Handle("POST /api/store/content/{id}/open", storeContentSignedPostHandler())
 	mux.Handle("/", ui)
 
 	return recoveryMiddleware(logger, loggingMiddleware(logger, mux)), nil

@@ -16,7 +16,7 @@ import {
   type StateSigner,
   type TransactionSigner,
 } from '@yellow-org/sdk'
-import { createWalletClient, custom, toHex, type Address, type Hex, type WalletClient } from 'viem'
+import { createWalletClient, custom, type Address, type Hex, type WalletClient } from 'viem'
 import { sepolia } from 'viem/chains'
 import { twMerge } from 'tailwind-merge'
 import './App.css'
@@ -123,17 +123,6 @@ type StoreUpdateResponse = {
   bootstrap?: StoreBootstrap
 }
 
-type ContentReadProof = {
-  domain: 'nitrolite-store-example'
-  version: '1'
-  action: 'open_content'
-  wallet_address: string
-  asset: string
-  app_session_id: string
-  item_id: string
-  issued_at: string
-}
-
 type APIError = {
   error?: {
     code: string
@@ -197,11 +186,11 @@ function parseSessionDataLabel(sessionData?: string): string {
     switch (parsed.intent) {
       case 'init':
         return 'Store session ready.'
-      case 'deposit':
+      case 'user_deposit':
         return 'Last action: deposit signed.'
       case 'purchase':
         return `Last action: purchased ${parsed.item_id} for ${parsed.item_price}`
-      case 'withdraw':
+      case 'user_withdraw':
         return 'Last action: withdrew from store.'
       default:
         return 'Store session active.'
@@ -209,20 +198,6 @@ function parseSessionDataLabel(sessionData?: string): string {
   } catch {
     return 'Store session active.'
   }
-}
-
-function contentReadPayloadV1(proof: ContentReadProof): string {
-  return [
-    'nitrolite-store-content',
-    `domain=${proof.domain}`,
-    `version=${proof.version}`,
-    `action=${proof.action}`,
-    `wallet_address=${proof.wallet_address}`,
-    `asset=${proof.asset.toLowerCase()}`,
-    `app_session_id=${proof.app_session_id}`,
-    `item_id=${proof.item_id}`,
-    `issued_at=${proof.issued_at}`,
-  ].join('\n')
 }
 
 function toRPCDefinition(definition: AppDefinitionV1) {
@@ -538,7 +513,7 @@ export default function App() {
         throw new Error('Withdraw amount exceeds your store balance.')
       }
 
-      const sessionData = JSON.stringify({ intent: 'withdraw' })
+      const sessionData = JSON.stringify({ intent: 'user_withdraw' })
       const appStateUpdate: AppStateUpdateV1 = {
         appSessionId: bootstrap.session.app_session_id!,
         intent: AppStateUpdateIntent.Withdraw,
@@ -590,7 +565,7 @@ export default function App() {
       const currentApp = new Decimal(bootstrap.session.app_allocation)
       const nextUser = currentUser.plus(amount)
 
-      const sessionData = JSON.stringify({ intent: 'deposit' })
+      const sessionData = JSON.stringify({ intent: 'user_deposit' })
       const appStateUpdate: AppStateUpdateV1 = {
         appSessionId: bootstrap.session.app_session_id!,
         intent: AppStateUpdateIntent.Deposit,
@@ -625,7 +600,7 @@ export default function App() {
   }
 
   async function openContent(itemID: string) {
-    if (!bootstrap || !walletAddress || !walletClient) return
+    if (!bootstrap || !walletAddress) return
     if (!bootstrap.session.app_session_id) {
       setError('Store session is not ready yet.')
       return
@@ -634,26 +609,11 @@ export default function App() {
     setBusy(`content:${itemID}`)
     setError(null)
     try {
-      const proof: ContentReadProof = {
-        domain: 'nitrolite-store-example',
-        version: '1',
-        action: 'open_content',
+      const params = new URLSearchParams({
         wallet_address: walletAddress,
         asset: bootstrap.selected_asset,
-        app_session_id: bootstrap.session.app_session_id,
-        item_id: itemID,
-        issued_at: new Date().toISOString(),
-      }
-      const payload = toHex(contentReadPayloadV1(proof))
-      const userSignature = await new AppSessionWalletSignerV1(new BrowserWalletSigner(walletClient, walletAddress as Address)).signMessage(payload)
-
-      const item = await readJSON<ContentResponse>(`/api/store/content/${encodeURIComponent(itemID)}/open`, {
-        method: 'POST',
-        body: JSON.stringify({
-          content_request: proof,
-          user_signature: userSignature,
-        }),
       })
+      const item = await readJSON<ContentResponse>(`/api/store/content/${encodeURIComponent(itemID)}?${params.toString()}`)
       setReaderItem(item)
       appendLog(`open content ${itemID}`)
     } catch (contentError) {

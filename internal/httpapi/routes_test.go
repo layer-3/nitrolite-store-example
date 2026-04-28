@@ -149,13 +149,12 @@ func TestStoreBootstrapWithYellowAsset(t *testing.T) {
 	}
 }
 
-func TestStoreContentLegacyGetDisabled(t *testing.T) {
+func TestStoreContentSignedPostDisabled(t *testing.T) {
 	t.Parallel()
 
-	walletAddress := "0x1111111111111111111111111111111111111111"
 	handler := newTestHandler(t, &testsupport.FakeClient{})
 
-	req := httptest.NewRequest(http.MethodGet, "/api/store/content/1?asset=yusd&wallet_address="+walletAddress, nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/store/content/1/open", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 

@@ -4,21 +4,22 @@
   - `GET /api/store/bootstrap`
   - `POST /api/store/init`
   - `POST /api/store/update`
-  - `POST /api/store/content/{id}/open`
+  - `GET /api/store/content/{id}`
 - amounts are decimal strings, never floats
 - error envelope:
 ```json
 {"error":{"code":"snake_case","message":"lowercase message"}}
 ```
-- store product routes are wallet-signature scoped
+- store state-changing routes are wallet-signature scoped
 - `POST /api/store/init` verifies `packCreateAppSessionRequestV1(definition, session_data)`
 - `POST /api/store/update` verifies `packAppStateUpdateV1(app_state_update)`
 - `POST /api/store/update` dispatches from `app_state_update.intent`
-- `POST /api/store/content/{id}/open` verifies a MetaMask-signed `open_content` proof before returning purchased content
+- `GET /api/store/content/{id}` is a public demo read path and must still require a submitted wallet purchase
+- do not present the content read gate as production-grade authorization
 - supported public actions are:
-  - `deposit`
+  - `user_deposit`
   - `purchase`
-  - `withdraw`
+  - `user_withdraw`
 - server must never trust client purchase price or allocation math
 - supported demo assets are `yusd` and `yellow`
 - one wallet-scoped store session per supported asset

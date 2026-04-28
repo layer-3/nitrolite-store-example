@@ -60,13 +60,10 @@ func storeUpdateHandler(storefront *service.WalletStoreService) http.Handler {
 
 func storeContentHandler(storefront *service.WalletStoreService) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req service.StoreContentOpenRequest
-		if err := decodeJSON(r, &req); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
-			return
-		}
-
-		item, err := storefront.Content(r.Context(), r.PathValue("id"), req)
+		item, err := storefront.Content(r.Context(), r.PathValue("id"), service.StoreContentRequest{
+			WalletAddress: r.URL.Query().Get("wallet_address"),
+			Asset:         r.URL.Query().Get("asset"),
+		})
 		if err != nil {
 			writeServiceError(w, err)
 			return
@@ -75,8 +72,8 @@ func storeContentHandler(storefront *service.WalletStoreService) http.Handler {
 	})
 }
 
-func storeContentLegacyHandler() http.Handler {
+func storeContentSignedPostHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "content reads require a signed POST to /api/store/content/{id}/open")
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "content reads use GET /api/store/content/{id}?wallet_address=...&asset=...")
 	})
 }

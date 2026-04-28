@@ -77,20 +77,6 @@ func verifyAppStateSignature(walletAddress string, update app.AppStateUpdateV1, 
 	return verifyWalletAppPayloadSignature(walletAddress, payload, signatureHex)
 }
 
-func contentReadPayloadV1(proof StoreContentReadProof) []byte {
-	return []byte(strings.Join([]string{
-		"nitrolite-store-content",
-		"domain=" + strings.TrimSpace(proof.Domain),
-		"version=" + strings.TrimSpace(proof.Version),
-		"action=" + strings.TrimSpace(proof.Action),
-		"wallet_address=" + strings.TrimSpace(proof.WalletAddress),
-		"asset=" + strings.ToLower(strings.TrimSpace(proof.Asset)),
-		"app_session_id=" + strings.TrimSpace(proof.AppSessionID),
-		"item_id=" + strings.TrimSpace(proof.ItemID),
-		"issued_at=" + strings.TrimSpace(proof.IssuedAt),
-	}, "\n"))
-}
-
 func verifyWalletAppPayloadSignature(walletAddress string, payload []byte, signatureHex string) error {
 	sigBytes, err := hexutil.Decode(strings.TrimSpace(signatureHex))
 	if err != nil {

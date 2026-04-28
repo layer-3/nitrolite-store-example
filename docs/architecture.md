@@ -22,7 +22,7 @@ It supports:
 - YUSD withdraw
 - YUSD item purchase
 - Yellow testnet item purchase
-- signed purchased-content reading
+- public demo purchased-content reading
 - activity tracing
 
 ## Store Session Model
@@ -39,7 +39,7 @@ It supports:
 - Deposit: backend returns the store app signature, frontend calls `submitAppSessionDeposit`.
 - Withdraw: backend calls `sdkClient.SubmitAppState`.
 - Purchase: backend calls `sdkClient.SubmitAppState`.
-- Content open: frontend signs an `open_content` proof, backend verifies the proof and submitted purchase before returning content.
+- Content open: frontend calls a public demo GET route; backend verifies the wallet session and submitted purchase before returning content. This is not a production authorization boundary.
 
 ## Startup Sequence
 

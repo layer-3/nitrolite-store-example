@@ -63,20 +63,9 @@ type StoreInitRequest struct {
 	UserSignature string              `json:"user_signature"`
 }
 
-type StoreContentOpenRequest struct {
-	ContentRequest StoreContentReadProof `json:"content_request"`
-	UserSignature  string                `json:"user_signature"`
-}
-
-type StoreContentReadProof struct {
-	Domain        string `json:"domain"`
-	Version       string `json:"version"`
-	Action        string `json:"action"`
-	WalletAddress string `json:"wallet_address"`
-	Asset         string `json:"asset"`
-	AppSessionID  string `json:"app_session_id"`
-	ItemID        string `json:"item_id"`
-	IssuedAt      string `json:"issued_at"`
+type StoreContentRequest struct {
+	WalletAddress string
+	Asset         string
 }
 
 type StoreUpdateResponse struct {
@@ -204,48 +193,15 @@ func (s *WalletStoreService) Bootstrap(ctx context.Context, walletAddress string
 	}, nil
 }
 
-func (s *WalletStoreService) Content(ctx context.Context, id string, req StoreContentOpenRequest) (*StoreCatalogItem, error) {
-	proof := req.ContentRequest
-	proof.Domain = strings.TrimSpace(proof.Domain)
-	proof.Version = strings.TrimSpace(proof.Version)
-	proof.Action = strings.TrimSpace(proof.Action)
-	proof.WalletAddress = strings.TrimSpace(proof.WalletAddress)
-	proof.Asset = strings.ToLower(strings.TrimSpace(proof.Asset))
-	proof.AppSessionID = strings.TrimSpace(proof.AppSessionID)
-	proof.ItemID = strings.TrimSpace(proof.ItemID)
-	proof.IssuedAt = strings.TrimSpace(proof.IssuedAt)
-
-	if proof.Domain != "nitrolite-store-example" || proof.Version != "1" || proof.Action != "open_content" {
-		return nil, invalidf("invalid content request")
-	}
-	if proof.WalletAddress == "" {
+func (s *WalletStoreService) Content(ctx context.Context, id string, req StoreContentRequest) (*StoreCatalogItem, error) {
+	walletAddress := strings.TrimSpace(req.WalletAddress)
+	if walletAddress == "" {
 		return nil, invalidf("wallet_address is required")
 	}
-	if proof.AppSessionID == "" {
-		return nil, invalidf("app_session_id is required")
-	}
-	if proof.ItemID == "" || proof.ItemID != strings.TrimSpace(id) {
-		return nil, conflictf("content request item does not match route")
-	}
-	if strings.TrimSpace(req.UserSignature) == "" {
-		return nil, invalidCodef("invalid_signature", "user_signature is required")
-	}
 
-	issuedAt, err := time.Parse(time.RFC3339Nano, proof.IssuedAt)
-	if err != nil {
-		return nil, invalidf("issued_at must be RFC3339")
-	}
-	now := s.now().UTC()
-	if issuedAt.Before(now.Add(-5*time.Minute)) || issuedAt.After(now.Add(5*time.Minute)) {
-		return nil, conflictCodef("stale_content_request", "content request has expired")
-	}
-
-	asset, err := s.normalizeAsset(proof.Asset)
+	asset, err := s.normalizeAsset(req.Asset)
 	if err != nil {
 		return nil, err
-	}
-	if asset != proof.Asset {
-		return nil, conflictf("content request asset does not match selected asset")
 	}
 
 	item := s.catalogItem(id)
@@ -253,33 +209,26 @@ func (s *WalletStoreService) Content(ctx context.Context, id string, req StoreCo
 		return nil, notFoundf("catalog item not found")
 	}
 
-	if err := verifyWalletAppPayloadSignature(proof.WalletAddress, contentReadPayloadV1(proof), req.UserSignature); err != nil {
-		return nil, err
-	}
-
-	stored, err := s.store.GetWalletSession(ctx, proof.WalletAddress, asset)
+	stored, err := s.store.GetWalletSession(ctx, walletAddress, asset)
 	if err != nil {
 		if err == store.ErrNotFound {
 			return nil, notFoundf("store session not found")
 		}
 		return nil, fmt.Errorf("failed to load wallet session: %w", err)
 	}
-	if stored.AppSessionID != proof.AppSessionID {
-		return nil, conflictf("content request app_session_id does not match wallet session")
-	}
 
 	current, err := s.lookupSession(ctx, stored.AppSessionID)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.validateSessionParticipants(current, proof.WalletAddress); err != nil {
+	if err := s.validateSessionParticipants(current, walletAddress); err != nil {
 		return nil, err
 	}
-	if err := s.reconcilePendingPurchases(ctx, proof.WalletAddress, asset, *current); err != nil {
+	if err := s.reconcilePendingPurchases(ctx, walletAddress, asset, *current); err != nil {
 		return nil, err
 	}
 
-	owned, err := s.store.HasWalletPurchase(ctx, proof.WalletAddress, id, asset)
+	owned, err := s.store.HasWalletPurchase(ctx, walletAddress, id, asset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check purchase: %w", err)
 	}
@@ -412,7 +361,7 @@ func (s *WalletStoreService) submitDeposit(ctx context.Context, asset string, re
 
 	return &StoreUpdateResponse{
 		Status:       "signed",
-		Intent:       string(StoreIntentDeposit),
+		Intent:       string(StoreIntentUserDeposit),
 		Asset:        asset,
 		AppSessionID: update.AppSessionID,
 		AppSignature: appSig,
@@ -442,7 +391,7 @@ func (s *WalletStoreService) submitAppStateUpdate(ctx context.Context, asset str
 	}
 
 	purchaseItemID := ""
-	responseIntent := string(StoreIntentWithdraw)
+	responseIntent := string(StoreIntentUserWithdraw)
 	switch update.Intent {
 	case app.AppStateUpdateIntentOperate:
 		if err := s.reconcilePendingPurchases(ctx, walletAddress, asset, *current); err != nil {
@@ -849,8 +798,8 @@ func (s *WalletStoreService) validateWithdraw(walletAddress string, asset string
 	if err := json.Unmarshal([]byte(strings.TrimSpace(update.SessionData)), &sessionData); err != nil {
 		return invalidf("invalid session_data")
 	}
-	if sessionData.Intent != StoreIntentWithdraw {
-		return invalidf("withdraw session_data.intent must be withdraw")
+	if sessionData.Intent != StoreIntentUserWithdraw {
+		return invalidf("withdraw session_data.intent must be user_withdraw")
 	}
 	currentUser, currentApp, err := currentBalancesForAsset(current.Allocations, walletAddress, s.appSigner.Address(), asset)
 	if err != nil {
@@ -900,8 +849,8 @@ func (s *WalletStoreService) validateDeposit(walletAddress string, asset string,
 	if err := json.Unmarshal([]byte(strings.TrimSpace(update.SessionData)), &sessionData); err != nil {
 		return invalidf("invalid session_data")
 	}
-	if sessionData.Intent != StoreIntentDeposit {
-		return invalidf("deposit session_data.intent must be deposit")
+	if sessionData.Intent != StoreIntentUserDeposit {
+		return invalidf("deposit session_data.intent must be user_deposit")
 	}
 
 	currentUser, currentApp, err := currentBalancesForAsset(current.Allocations, walletAddress, s.appSigner.Address(), asset)

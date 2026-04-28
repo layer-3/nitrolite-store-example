@@ -1,6 +1,6 @@
 # API
 
-The store API is intentionally small and wallet-signature driven.
+The store API is intentionally small. App-session creation and state changes are wallet-signature driven; content reads use a public demo gate.
 
 ## `GET /api/store/bootstrap`
 
@@ -29,7 +29,7 @@ The backend verifies the shopper signature over `packCreateAppSessionRequestV1(d
 
 ## `POST /api/store/update`
 
-Handles deposit, withdraw, and purchase updates.
+Handles user deposit, user withdraw, and purchase updates.
 
 Request fields:
 
@@ -43,7 +43,7 @@ The backend verifies the shopper signature over `packAppStateUpdateV1(app_state_
 Deposit returns:
 
 - `status: "signed"`
-- `intent: "deposit"`
+- `intent: "user_deposit"`
 - `app_signature`
 
 Withdraw and purchase return:
@@ -52,29 +52,22 @@ Withdraw and purchase return:
 - `intent`
 - `bootstrap`
 
-## `POST /api/store/content/{id}/open`
+`app_state_update.intent` remains the Nitrolite protocol intent (`deposit`, `withdraw`, or `operate`). The nested `session_data.intent` is the store-level action (`user_deposit`, `user_withdraw`, or `purchase`).
 
-Opens purchased content after the shopper signs a read proof.
+## `GET /api/store/content/{id}`
 
-Request fields:
+Opens purchased content for a wallet and asset.
 
-- `content_request`
-- `user_signature`
+Query:
 
-`content_request` fields:
-
-- `domain: "nitrolite-store-example"`
-- `version: "1"`
-- `action: "open_content"`
 - `wallet_address`
 - `asset`, `yusd` or `yellow`
-- `app_session_id`
-- `item_id`
-- `issued_at`, RFC3339 timestamp
 
-The backend verifies the signature, requires `issued_at` to be within 5 minutes, confirms the wallet session and item match the request, reconciles pending purchases, and returns content only for a submitted purchase.
+The backend confirms the wallet session, reconciles pending purchases, and returns content only for a submitted purchase.
 
-`GET /api/store/content/{id}` is intentionally disabled and returns `405`.
+This is intentionally a public example-app read path. It does not prove the caller controls `wallet_address`; production content APIs should use an authenticated read session, signed read proof, or equivalent authorization boundary.
+
+`POST /api/store/content/{id}/open` is disabled and returns `405`.
 
 ## Errors
 
@@ -98,13 +91,13 @@ Important signed-flow codes:
 Deposit:
 
 ```json
-{"intent":"deposit"}
+{"intent":"user_deposit"}
 ```
 
 Withdraw:
 
 ```json
-{"intent":"withdraw"}
+{"intent":"user_withdraw"}
 ```
 
 Purchase:

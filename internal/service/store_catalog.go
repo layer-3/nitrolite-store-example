@@ -21,9 +21,9 @@ type StoreCatalogItem struct {
 type StoreSessionIntent string
 
 const (
-	StoreIntentDeposit  StoreSessionIntent = "deposit"
-	StoreIntentPurchase StoreSessionIntent = "purchase"
-	StoreIntentWithdraw StoreSessionIntent = "withdraw"
+	StoreIntentUserDeposit  StoreSessionIntent = "user_deposit"
+	StoreIntentPurchase     StoreSessionIntent = "purchase"
+	StoreIntentUserWithdraw StoreSessionIntent = "user_withdraw"
 )
 
 type StoreSessionData struct {

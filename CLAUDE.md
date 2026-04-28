@@ -36,4 +36,4 @@ Active API:
 - `GET /api/store/bootstrap`
 - `POST /api/store/init`
 - `POST /api/store/update`
-- `POST /api/store/content/{id}/open`
+- `GET /api/store/content/{id}`
