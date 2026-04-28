@@ -31,6 +31,7 @@ The shopper flow is intentionally narrow:
 - The backend verifies the exact signed payload before adding the store app signature.
 - The backend never signs as the shopper.
 - Store authorization is based on app-session signatures, not login cookies.
+- Deposit checkpoints store the signed deposit payload long enough to resume a browser-side Clearnode submit after reload or timeout.
 - This is not a production-ready authorization model: content reads use a public example-app gate keyed by wallet, item, and submitted purchase status, so production apps should add an authenticated read session, signed read proof, or equivalent boundary before serving confidential content.
 
 ## Required Flows
@@ -53,14 +54,16 @@ The shopper flow is intentionally narrow:
 1. User enters a YUSD amount and presses `Deposit`.
 2. Frontend uses cached bootstrap data or refreshes `GET /api/store/bootstrap`.
 3. Frontend constructs `AppStateUpdateV1` with `AppStateUpdateIntent.Deposit`.
-4. `sessionData` is `{"intent":"user_deposit"}`.
+4. `sessionData` is `{"intent":"user_deposit","amount":"..."}`.
 5. Frontend encodes with `packAppStateUpdateV1`.
 6. MetaMask signs the encoded payload.
 7. Frontend calls `POST /api/store/update`.
 8. Backend verifies the update, signature, version, participants, asset, and allocation delta.
-9. Backend returns the store app signature.
+9. Backend persists a signed deposit checkpoint and returns the store app signature.
 10. Frontend submits to Clearnode with `submitAppSessionDeposit`.
 11. Frontend refreshes bootstrap and shows the updated store balance.
+
+If the browser is closed or the Clearnode submit times out after step 9, bootstrap returns `pending_action` for the signed deposit. The frontend shows `Resume`, which reuses the stored signatures and does not ask MetaMask to sign again.
 
 ### Withdraw
 

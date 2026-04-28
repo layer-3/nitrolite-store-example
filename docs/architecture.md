@@ -4,7 +4,7 @@
 
 - `cmd/server` loads config, signers, Nitrolite manager, SQLite store, and HTTP handler.
 - `internal/nitrolite.Manager` owns the active SDK client, health state, and reconnect loop.
-- `internal/store` persists wallet store sessions and purchases.
+- `internal/store` persists wallet store sessions, purchases, and resumable deposit checkpoints.
 - `internal/service.WalletStoreService` owns bootstrap, app-session creation, signed update verification, catalog, purchase recording, and content gating.
 - `internal/httpapi` is a thin transport layer.
 - `frontend/` is the React source.
@@ -21,6 +21,7 @@ It supports:
 - YUSD deposit
 - YUSD withdraw
 - YUSD item purchase
+- Yellow testnet deposit and withdraw
 - Yellow testnet item purchase
 - public demo purchased-content reading
 - activity tracing
@@ -31,12 +32,12 @@ It supports:
 - The app session has exactly two participants: shopper wallet and store app signer.
 - Each participant has signature weight `1`.
 - Quorum is `2`.
-- Purchases are keyed by wallet, item, and asset. The active demo assets are `yusd` and `yellow`; `yusd` remains the source-story reference path.
+- Purchases are keyed by wallet, item, and asset. Deposit checkpoints are keyed by wallet and asset and hold the signed payload until the Clearnode session catches up. The active demo assets are `yusd` and `yellow`; `yusd` remains the source-story reference path.
 
 ## Submission Boundaries
 
 - App session creation: backend calls `sdkClient.CreateAppSession`.
-- Deposit: backend returns the store app signature, frontend calls `submitAppSessionDeposit`.
+- Deposit: backend stores a checkpoint and returns the store app signature, frontend calls `submitAppSessionDeposit`, and bootstrap exposes `pending_action` if the browser needs to resume.
 - Withdraw: backend calls `sdkClient.SubmitAppState`.
 - Purchase: backend calls `sdkClient.SubmitAppState`.
 - Content open: frontend calls a public demo GET route; backend verifies the wallet session and submitted purchase before returning content. This is not a production authorization boundary.

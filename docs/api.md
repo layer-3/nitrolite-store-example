@@ -9,7 +9,7 @@ Query:
 - `wallet_address`
 - `asset`, optional, defaults to the configured default asset
 
-Returns store metadata, supported assets, available Clearnode balance, catalog, current wallet session state, and wallet-owned library items.
+Returns store metadata, supported assets, available Clearnode balance, catalog, current wallet session state, wallet-owned library items, and an optional pending deposit action.
 
 Supported demo assets are `yusd` and `yellow`. `yusd` is the source-story path; `yellow` is retained as a second testnet asset for the same app-session flows.
 
@@ -45,6 +45,7 @@ Deposit returns:
 - `status: "signed"`
 - `intent: "user_deposit"`
 - `app_signature`
+- `pending_action`, containing the signed deposit payload needed for browser-side resume
 
 Withdraw and purchase return:
 
@@ -53,6 +54,8 @@ Withdraw and purchase return:
 - `bootstrap`
 
 `app_state_update.intent` remains the Nitrolite protocol intent (`deposit`, `withdraw`, or `operate`). The nested `session_data.intent` is the store-level action (`user_deposit`, `user_withdraw`, or `purchase`).
+
+For deposits, the backend stores a checkpoint before returning the app signature. Bootstrap returns that checkpoint as `pending_action` until Clearnode reflects the submitted app session version, so the frontend can resume after reload without asking MetaMask to sign again.
 
 ## `GET /api/store/content/{id}`
 
@@ -91,7 +94,7 @@ Important signed-flow codes:
 Deposit:
 
 ```json
-{"intent":"user_deposit"}
+{"intent":"user_deposit","amount":"1.00"}
 ```
 
 Withdraw:

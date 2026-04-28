@@ -1,7 +1,7 @@
-import { type ReactNode, useMemo, useRef, useState } from 'react'
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import Decimal from 'decimal.js'
 import { AnimatePresence, motion, type HTMLMotionProps } from 'motion/react'
-import { Activity, BookOpen, CheckCircle2, Copy, CreditCard, Library, Loader2, RefreshCw, ShieldCheck, ShoppingBag, Wallet } from 'lucide-react'
+import { Activity, AlertTriangle, BookOpen, CheckCircle2, Copy, CreditCard, Library, Loader2, RefreshCw, ShieldCheck, ShoppingBag, Wallet } from 'lucide-react'
 import { clsx, type ClassValue } from 'clsx'
 import {
   AppSessionWalletSignerV1,
@@ -23,6 +23,8 @@ import './App.css'
 
 const DEFAULT_ASSET = 'yusd'
 const DEMO_ASSETS = ['yusd', 'yellow']
+const STORED_ASSET_KEY = 'nitrolite-store:selected-asset'
+const DEPOSIT_SUBMIT_TIMEOUT_MS = 45_000
 const DEFAULT_WS_URL = import.meta.env.VITE_CLEARNODE_WS_URL || 'wss://clearnode-sandbox.yellow.org/v1/ws'
 const DEFAULT_BLOCKCHAIN_RPCS: Record<number, string> = {
   11155111: import.meta.env.VITE_BLOCKCHAIN_RPC_11155111 || 'https://ethereum-sepolia-rpc.publicnode.com',
@@ -30,6 +32,8 @@ const DEFAULT_BLOCKCHAIN_RPCS: Record<number, string> = {
 
 type InjectedProvider = {
   request: (args: { method: string; params?: unknown[] }) => Promise<unknown>
+  on?: (event: 'accountsChanged' | 'chainChanged', listener: (value?: unknown) => void) => void
+  removeListener?: (event: 'accountsChanged' | 'chainChanged', listener: (value?: unknown) => void) => void
   isMetaMask?: boolean
 }
 
@@ -89,6 +93,32 @@ type StoreSession = {
   session_data?: string
 }
 
+type RPCAppStateUpdate = {
+  app_session_id: string
+  intent: number
+  version: string
+  allocations: {
+    participant: string
+    asset: string
+    amount: string
+  }[]
+  session_data: string
+}
+
+type StorePendingAction = {
+  type: string
+  status: string
+  asset: string
+  app_session_id: string
+  version: number
+  amount: string
+  app_state_update: RPCAppStateUpdate
+  user_signature: Hex
+  app_signature: Hex
+  created_at: string
+  updated_at: string
+}
+
 type StoreLibraryItem = {
   id: string
   title: string
@@ -110,6 +140,7 @@ type StoreBootstrap = {
   catalog: StoreCatalogItem[]
   session: StoreSession
   library: StoreLibraryItem[]
+  pending_action?: StorePendingAction
 }
 
 type ContentResponse = StoreCatalogItem
@@ -120,6 +151,7 @@ type StoreUpdateResponse = {
   asset: string
   app_session_id: string
   app_signature?: Hex
+  pending_action?: StorePendingAction
   bootstrap?: StoreBootstrap
 }
 
@@ -142,6 +174,41 @@ function getMetaMaskProvider(): InjectedProvider | null {
     return provider ?? null
   }
   return ethereum.isMetaMask ? ethereum : null
+}
+
+function loadStoredAsset(): string {
+  try {
+    const stored = window.localStorage.getItem(STORED_ASSET_KEY)
+    return stored && DEMO_ASSETS.includes(stored) ? stored : DEFAULT_ASSET
+  } catch {
+    return DEFAULT_ASSET
+  }
+}
+
+function persistAsset(asset: string) {
+  try {
+    window.localStorage.setItem(STORED_ASSET_KEY, asset)
+  } catch {
+    // Local storage is best-effort; wallet recovery still works without it.
+  }
+}
+
+async function createWalletConnections(provider: InjectedProvider, wallet: string) {
+  const client = createWalletClient({
+    account: wallet as Address,
+    chain: sepolia,
+    transport: custom(provider),
+  })
+
+  const walletSigner = new BrowserWalletSigner(client, wallet as Address)
+  const nitrolite = await Client.create(
+    DEFAULT_WS_URL,
+    new ChannelDefaultSigner(walletSigner),
+    walletSigner,
+    withBlockchainRPC(11155111n, DEFAULT_BLOCKCHAIN_RPCS[11155111]),
+  )
+
+  return { client, nitrolite }
 }
 
 async function readJSON<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
@@ -226,6 +293,32 @@ function toRPCAppStateUpdate(update: AppStateUpdateV1) {
   }
 }
 
+function fromRPCAppStateUpdate(update: RPCAppStateUpdate): AppStateUpdateV1 {
+  return {
+    appSessionId: update.app_session_id,
+    intent: Number(update.intent) as AppStateUpdateIntent,
+    version: BigInt(update.version),
+    allocations: update.allocations.map((allocation) => ({
+      participant: allocation.participant as Address,
+      asset: allocation.asset,
+      amount: new Decimal(allocation.amount),
+    })),
+    sessionData: update.session_data,
+  }
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeoutID: number | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutID = window.setTimeout(() => reject(new Error(message)), timeoutMs)
+  })
+  try {
+    return await Promise.race([promise, timeout])
+  } finally {
+    if (timeoutID !== undefined) window.clearTimeout(timeoutID)
+  }
+}
+
 function MagicPanel({ children, className }: { children: ReactNode; className?: string }) {
   return (
     <motion.section
@@ -299,7 +392,7 @@ export default function App() {
   const [walletAddress, setWalletAddress] = useState<string | null>(null)
   const [walletClient, setWalletClient] = useState<WalletClient | null>(null)
   const [nitroliteClient, setNitroliteClient] = useState<Client | null>(null)
-  const [selectedAsset, setSelectedAsset] = useState(DEFAULT_ASSET)
+  const [selectedAsset, setSelectedAsset] = useState(loadStoredAsset)
   const [bootstrap, setBootstrap] = useState<StoreBootstrap | null>(null)
   const [depositAmount, setDepositAmount] = useState('1.00')
   const [withdrawAmount, setWithdrawAmount] = useState('0.50')
@@ -315,8 +408,10 @@ export default function App() {
     return DEMO_ASSETS.filter((asset) => supported.has(asset))
   }, [bootstrap])
   const sessionReady = Boolean(bootstrap?.session.app_session_id && bootstrap.session.status === 'open')
-  const canDeposit = Boolean(walletAddress && sessionReady && busy === null && isPositiveAmount(depositAmount))
+  const pendingDeposit = bootstrap?.pending_action?.type === 'user_deposit' ? bootstrap.pending_action : null
+  const canDeposit = Boolean(walletAddress && sessionReady && busy === null && !pendingDeposit && isPositiveAmount(depositAmount))
   const canWithdraw = Boolean(walletAddress && sessionReady && busy === null && isPositiveAmount(withdrawAmount))
+  const canResumeDeposit = Boolean(walletAddress && nitroliteClient && pendingDeposit && busy === null)
 
   function appendLog(line: string) {
     const stamped = `${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} ${line}`
@@ -337,6 +432,77 @@ export default function App() {
     }
   }
 
+  async function hydrateWallet(provider: InjectedProvider, wallet: string, asset: string, label: string) {
+    await ensureSepolia(provider)
+    const { client, nitrolite } = await createWalletConnections(provider, wallet)
+    setWalletAddress(wallet)
+    setWalletClient(client)
+    setNitroliteClient(nitrolite)
+    appendLog(`${label} ${shortAddress(wallet)}`)
+    await refreshBootstrap(asset, nitrolite, wallet, client)
+  }
+
+  useEffect(() => {
+    const provider = getMetaMaskProvider()
+    if (!provider) return
+
+    let cancelled = false
+    const restore = async (wallet: string) => {
+      setBusy('restore')
+      setError(null)
+      try {
+        await hydrateWallet(provider, wallet, loadStoredAsset(), 'wallet restored')
+      } catch (restoreError) {
+        if (!cancelled) {
+          setError(restoreError instanceof Error ? restoreError.message : 'Failed to restore wallet')
+        }
+      } finally {
+        if (!cancelled) setBusy(null)
+      }
+    }
+
+    void provider
+      .request({ method: 'eth_accounts' })
+      .then((accounts) => {
+        if (cancelled || !Array.isArray(accounts) || typeof accounts[0] !== 'string') return
+        return restore(accounts[0])
+      })
+      .catch(() => undefined)
+
+    const onAccountsChanged = (value?: unknown) => {
+      const wallet = Array.isArray(value) && typeof value[0] === 'string' ? value[0] : null
+      if (!wallet) {
+        setWalletAddress(null)
+        setWalletClient(null)
+        setNitroliteClient(null)
+        setBootstrap(null)
+        setReaderItem(null)
+        appendLog('wallet disconnected')
+        return
+      }
+      void restore(wallet)
+    }
+    const onChainChanged = () => {
+      void provider
+        .request({ method: 'eth_accounts' })
+        .then((accounts) => {
+          if (!Array.isArray(accounts) || typeof accounts[0] !== 'string') return
+          return restore(accounts[0])
+        })
+        .catch(() => undefined)
+    }
+
+    provider.on?.('accountsChanged', onAccountsChanged)
+    provider.on?.('chainChanged', onChainChanged)
+    return () => {
+      cancelled = true
+      provider.removeListener?.('accountsChanged', onAccountsChanged)
+      provider.removeListener?.('chainChanged', onChainChanged)
+    }
+    // Run once so refreshes do not repeatedly recreate the SDK client.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   async function refreshBootstrap(asset: string, clientOverride?: Client | null, walletOverride?: string | null, walletClientOverride?: WalletClient | null) {
     const client = clientOverride ?? nitroliteClient
     const wallet = walletOverride ?? walletAddress
@@ -349,6 +515,7 @@ export default function App() {
     )
     setBootstrap(next)
     setSelectedAsset(next.selected_asset)
+    persistAsset(next.selected_asset)
     appendLog(`bootstrap ${asset.toUpperCase()} -> ${next.session.status}`)
 
     if (next.session.status === 'missing' && client && wallet && clientSigner && !autoCreatingRef.current) {
@@ -380,25 +547,7 @@ export default function App() {
         throw new Error('MetaMask did not return an account.')
       }
 
-      const client = createWalletClient({
-        account: wallet as Address,
-        chain: sepolia,
-        transport: custom(provider),
-      })
-
-      const walletSigner = new BrowserWalletSigner(client, wallet as Address)
-      const nitrolite = await Client.create(
-        DEFAULT_WS_URL,
-        new ChannelDefaultSigner(walletSigner),
-        walletSigner,
-        withBlockchainRPC(11155111n, DEFAULT_BLOCKCHAIN_RPCS[11155111]),
-      )
-
-      setWalletAddress(wallet)
-      setWalletClient(client)
-      setNitroliteClient(nitrolite)
-      appendLog(`wallet connected ${shortAddress(wallet)}`)
-      await refreshBootstrap(selectedAsset, nitrolite, wallet, client)
+      await hydrateWallet(provider, wallet, selectedAsset, 'wallet connected')
     } catch (connectError) {
       setError(connectError instanceof Error ? connectError.message : 'Failed to connect wallet')
     } finally {
@@ -546,6 +695,39 @@ export default function App() {
     }
   }
 
+  async function finishDeposit(appStateUpdate: AppStateUpdateV1, userSignature: Hex, appSignature: Hex, asset: string, amount: Decimal) {
+    if (!nitroliteClient) throw new Error('Connect a wallet before submitting the deposit.')
+    appendLog(`deposit signed ${amount.toFixed()} ${asset.toUpperCase()}; submitting`)
+    await withTimeout(
+      nitroliteClient.submitAppSessionDeposit(appStateUpdate, [userSignature, appSignature], asset, amount),
+      DEPOSIT_SUBMIT_TIMEOUT_MS,
+      'Deposit is signed, but the Clearnode submit did not finish yet. Use Resume deposit after refresh.',
+    )
+    await refreshBootstrap(asset)
+    appendLog(`deposit ${amount.toFixed()} ${asset.toUpperCase()} submitted`)
+  }
+
+  async function resumeDeposit() {
+    if (!pendingDeposit) return
+
+    setBusy('resume-deposit')
+    setError(null)
+    try {
+      const amount = new Decimal(pendingDeposit.amount)
+      const appStateUpdate = fromRPCAppStateUpdate(pendingDeposit.app_state_update)
+      await finishDeposit(appStateUpdate, pendingDeposit.user_signature, pendingDeposit.app_signature, pendingDeposit.asset, amount)
+    } catch (resumeError) {
+      setError(resumeError instanceof Error ? resumeError.message : 'Failed to resume deposit')
+      try {
+        await refreshBootstrap(pendingDeposit.asset)
+      } catch {
+        // The original recovery error is more useful to the user.
+      }
+    } finally {
+      setBusy(null)
+    }
+  }
+
   async function submitDeposit() {
     if (!bootstrap || !walletAddress || !walletClient || !nitroliteClient) return
     if (!sessionReady) {
@@ -565,7 +747,7 @@ export default function App() {
       const currentApp = new Decimal(bootstrap.session.app_allocation)
       const nextUser = currentUser.plus(amount)
 
-      const sessionData = JSON.stringify({ intent: 'user_deposit' })
+      const sessionData = JSON.stringify({ intent: 'user_deposit', amount: amount.toFixed() })
       const appStateUpdate: AppStateUpdateV1 = {
         appSessionId: bootstrap.session.app_session_id!,
         intent: AppStateUpdateIntent.Deposit,
@@ -589,11 +771,14 @@ export default function App() {
         }),
       })
       if (!result.app_signature) throw new Error('Backend did not return an app signature for deposit.')
-      await nitroliteClient.submitAppSessionDeposit(appStateUpdate, [userSignature, result.app_signature], bootstrap.selected_asset, amount)
-      await refreshBootstrap(bootstrap.selected_asset)
-      appendLog(`deposit ${amount.toFixed()}`)
+      await finishDeposit(appStateUpdate, userSignature, result.app_signature, bootstrap.selected_asset, amount)
     } catch (depositError) {
       setError(depositError instanceof Error ? depositError.message : 'Failed to add funds')
+      try {
+        await refreshBootstrap(bootstrap.selected_asset)
+      } catch {
+        // Preserve the deposit error while leaving any checkpoint visible if bootstrap succeeds.
+      }
     } finally {
       setBusy(null)
     }
@@ -634,6 +819,7 @@ export default function App() {
 
   function switchAsset(asset: string) {
     setReaderItem(null)
+    persistAsset(asset)
     if (walletAddress) {
       setBusy(`asset:${asset}`)
       setError(null)
@@ -680,9 +866,9 @@ export default function App() {
             className="w-full"
             onClick={connectWallet}
             disabled={busy !== null}
-            icon={busy === 'connect' ? <Loader2 className="size-4 animate-spin" /> : <Wallet className="size-4" />}
+            icon={busy === 'connect' || busy === 'restore' ? <Loader2 className="size-4 animate-spin" /> : <Wallet className="size-4" />}
           >
-            {busy === 'connect' ? 'Connecting' : walletAddress ? 'Reconnect' : 'Connect'}
+            {busy === 'restore' ? 'Restoring' : busy === 'connect' ? 'Connecting' : walletAddress ? 'Reconnect' : 'Connect'}
           </ActionButton>
           <div className="rounded-lg border border-black/10 bg-white/90 p-4 shadow-sm">
             <p className="label-text">Wallet</p>
@@ -747,6 +933,29 @@ export default function App() {
           <p className="mt-4 rounded-lg border border-black/10 bg-yellow-surface/70 px-3 py-2 text-sm font-semibold text-black/70" aria-live="polite">
             {bootstrap ? parseSessionDataLabel(bootstrap.session.session_data) : 'Connect wallet to load the store.'}
           </p>
+
+          {pendingDeposit ? (
+            <div className="mt-4 flex flex-col gap-3 rounded-lg border border-yellow-line bg-yellow-brand/25 p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0">
+                <p className="flex items-center gap-2 text-sm font-black text-ink">
+                  <AlertTriangle className="size-4 shrink-0" />
+                  Deposit checkpoint ready
+                </p>
+                <p className="mt-1 text-sm font-semibold leading-5 text-black/60">
+                  {formatAmount(pendingDeposit.amount)} {pendingDeposit.asset.toUpperCase()} is signed at version {pendingDeposit.version}. Resume submits it to Clearnode without another MetaMask prompt.
+                </p>
+              </div>
+              <ActionButton
+                className="shrink-0"
+                variant="secondary"
+                disabled={!canResumeDeposit}
+                onClick={resumeDeposit}
+                icon={busy === 'resume-deposit' ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+              >
+                {busy === 'resume-deposit' ? 'Resuming' : 'Resume'}
+              </ActionButton>
+            </div>
+          ) : null}
 
           <div className="mt-5 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
             <label className="grid gap-2 text-sm font-black text-ink">

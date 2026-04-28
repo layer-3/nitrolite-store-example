@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"path/filepath"
@@ -643,6 +644,119 @@ func TestWalletStoreServiceSubmitDepositAcceptsInitialEmptyAllocations(t *testin
 	}
 	if resp.Status != "signed" || resp.Intent != string(StoreIntentUserDeposit) || resp.AppSignature == "" {
 		t.Fatalf("unexpected response = %#v", resp)
+	}
+	if resp.PendingAction == nil || resp.PendingAction.Type != string(StoreIntentUserDeposit) || resp.PendingAction.Amount != "1" {
+		t.Fatalf("unexpected pending deposit action = %#v", resp.PendingAction)
+	}
+	bootstrap, err := service.Bootstrap(context.Background(), userSigner.Address(), "yusd")
+	if err != nil {
+		t.Fatalf("Bootstrap() error = %v", err)
+	}
+	if bootstrap.PendingAction == nil || bootstrap.PendingAction.AppSignature != resp.AppSignature || bootstrap.PendingAction.AppStateUpdate.Version != "2" {
+		t.Fatalf("bootstrap pending action = %#v, want resumable deposit", bootstrap.PendingAction)
+	}
+}
+
+func TestWalletStoreServiceBootstrapReconcilesDepositCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	userSigner := mustTestSigner(t)
+	appSigner := mustStoreAppSigner(t)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	sessionData := `{"intent":"user_deposit","amount":"1"}`
+	currentSession := app.AppSessionInfoV1{
+		AppSessionID: "0xsession",
+		AppDefinition: app.AppDefinitionV1{
+			ApplicationID: "store",
+			Participants: []app.AppParticipantV1{
+				{WalletAddress: userSigner.Address(), SignatureWeight: 1},
+				{WalletAddress: appSigner.Address(), SignatureWeight: 1},
+			},
+			Quorum: 2,
+			Nonce:  1,
+		},
+		Version:     2,
+		SessionData: sessionData,
+		Allocations: []app.AppAllocationV1{
+			{Participant: userSigner.Address(), Asset: "yusd", Amount: decimal.RequireFromString("1.0")},
+			{Participant: appSigner.Address(), Asset: "yusd", Amount: decimal.Zero},
+		},
+	}
+	service, appStore := newWalletStoreServiceForTest(t, userSigner, appSigner, &currentSession)
+	service.now = func() time.Time { return now }
+
+	if err := appStore.UpsertWalletSession(context.Background(), store.WalletStoreSession{
+		WalletAddress:  userSigner.Address(),
+		Asset:          "yusd",
+		AppSessionID:   currentSession.AppSessionID,
+		Status:         "open",
+		Version:        1,
+		UserAllocation: "0",
+		AppAllocation:  "0",
+		SessionData:    `{"intent":"init"}`,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}); err != nil {
+		t.Fatalf("UpsertWalletSession() error = %v", err)
+	}
+
+	update := app.AppStateUpdateV1{
+		AppSessionID: currentSession.AppSessionID,
+		Intent:       app.AppStateUpdateIntentDeposit,
+		Version:      currentSession.Version,
+		Allocations:  currentSession.Allocations,
+		SessionData:  sessionData,
+	}
+	userSig, err := signAppStateUpdate(update, userSigner)
+	if err != nil {
+		t.Fatalf("signAppStateUpdate() error = %v", err)
+	}
+	appSig, err := signAppStateUpdate(update, appSigner)
+	if err != nil {
+		t.Fatalf("signAppStateUpdate() app error = %v", err)
+	}
+	rpcUpdate := rpc.AppStateUpdateV1{
+		AppSessionID: update.AppSessionID,
+		Intent:       update.Intent,
+		Version:      "2",
+		Allocations: []rpc.AppAllocationV1{
+			{Participant: userSigner.Address(), Asset: "yusd", Amount: "1.0"},
+			{Participant: appSigner.Address(), Asset: "yusd", Amount: "0"},
+		},
+		SessionData: update.SessionData,
+	}
+	updateJSON, err := json.Marshal(rpcUpdate)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	checkpointID := store.WalletDepositCheckpointID(userSigner.Address(), "yusd")
+	if err := appStore.UpsertDepositCheckpoint(context.Background(), store.WalletDepositCheckpoint{
+		ID:             checkpointID,
+		WalletAddress:  userSigner.Address(),
+		Asset:          "yusd",
+		AppSessionID:   currentSession.AppSessionID,
+		Version:        currentSession.Version,
+		Amount:         "1",
+		Status:         store.WalletDepositCheckpointStatusAppSigned,
+		AppStateUpdate: string(updateJSON),
+		UserSignature:  userSig,
+		AppSignature:   appSig,
+		SessionData:    sessionData,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}); err != nil {
+		t.Fatalf("UpsertDepositCheckpoint() error = %v", err)
+	}
+
+	resp, err := service.Bootstrap(context.Background(), userSigner.Address(), "yusd")
+	if err != nil {
+		t.Fatalf("Bootstrap() error = %v", err)
+	}
+	if resp.PendingAction != nil || resp.Session.Version != currentSession.Version || resp.Session.UserAllocation != "1" {
+		t.Fatalf("bootstrap = %#v, want reconciled deposit checkpoint", resp)
+	}
+	if _, err := appStore.GetActiveDepositCheckpoint(context.Background(), userSigner.Address(), "yusd"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("active checkpoint error = %v, want ErrNotFound", err)
 	}
 }
 

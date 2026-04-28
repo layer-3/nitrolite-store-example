@@ -27,6 +27,7 @@ type StoreBootstrapResponse struct {
 	Catalog          []StoreCatalogItem  `json:"catalog"`
 	Session          StoreShopperSession `json:"session"`
 	Library          []StoreLibraryItem  `json:"library"`
+	PendingAction    *StorePendingAction `json:"pending_action,omitempty"`
 }
 
 type StoreShopperSession struct {
@@ -68,13 +69,28 @@ type StoreContentRequest struct {
 	Asset         string
 }
 
+type StorePendingAction struct {
+	Type           string               `json:"type"`
+	Status         string               `json:"status"`
+	Asset          string               `json:"asset"`
+	AppSessionID   string               `json:"app_session_id"`
+	Version        uint64               `json:"version"`
+	Amount         string               `json:"amount"`
+	AppStateUpdate rpc.AppStateUpdateV1 `json:"app_state_update"`
+	UserSignature  string               `json:"user_signature"`
+	AppSignature   string               `json:"app_signature"`
+	CreatedAt      string               `json:"created_at"`
+	UpdatedAt      string               `json:"updated_at"`
+}
+
 type StoreUpdateResponse struct {
-	Status       string                  `json:"status"`
-	Intent       string                  `json:"intent"`
-	Asset        string                  `json:"asset"`
-	AppSessionID string                  `json:"app_session_id"`
-	AppSignature string                  `json:"app_signature,omitempty"`
-	Bootstrap    *StoreBootstrapResponse `json:"bootstrap,omitempty"`
+	Status        string                  `json:"status"`
+	Intent        string                  `json:"intent"`
+	Asset         string                  `json:"asset"`
+	AppSessionID  string                  `json:"app_session_id"`
+	AppSignature  string                  `json:"app_signature,omitempty"`
+	PendingAction *StorePendingAction     `json:"pending_action,omitempty"`
+	Bootstrap     *StoreBootstrapResponse `json:"bootstrap,omitempty"`
 }
 
 type submitAppStateFunc func(ctx context.Context, wsURL string, req rpc.AppSessionsV1SubmitAppStateRequest) error
@@ -144,6 +160,7 @@ func (s *WalletStoreService) Bootstrap(ctx context.Context, walletAddress string
 		UserAllocation: "0",
 		AppAllocation:  "0",
 	}
+	var pendingAction *StorePendingAction
 
 	stored, err := s.store.GetWalletSession(ctx, walletAddress, asset)
 	if err != nil && err != store.ErrNotFound {
@@ -158,6 +175,10 @@ func (s *WalletStoreService) Bootstrap(ctx context.Context, walletAddress string
 			}
 			session = *summary
 			if err := s.reconcilePendingPurchases(ctx, walletAddress, asset, *current); err != nil {
+				return nil, err
+			}
+			pendingAction, err = s.reconcileDepositCheckpoint(ctx, walletAddress, asset, *current)
+			if err != nil {
 				return nil, err
 			}
 		} else {
@@ -190,6 +211,7 @@ func (s *WalletStoreService) Bootstrap(ctx context.Context, walletAddress string
 		Catalog:          catalog,
 		Session:          session,
 		Library:          library,
+		PendingAction:    pendingAction,
 	}, nil
 }
 
@@ -358,13 +380,45 @@ func (s *WalletStoreService) submitDeposit(ctx context.Context, asset string, re
 	if err != nil {
 		return nil, err
 	}
+	updateJSON, err := json.Marshal(req.AppStateUpdate)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode deposit checkpoint: %w", err)
+	}
+	amount, err := depositAmountForState(walletAddress, s.appSigner.Address(), asset, current, update)
+	if err != nil {
+		return nil, err
+	}
+	now := s.now().UTC()
+	checkpoint := store.WalletDepositCheckpoint{
+		ID:             store.WalletDepositCheckpointID(walletAddress, asset),
+		WalletAddress:  walletAddress,
+		Asset:          asset,
+		AppSessionID:   update.AppSessionID,
+		Version:        update.Version,
+		Amount:         amount,
+		Status:         store.WalletDepositCheckpointStatusAppSigned,
+		AppStateUpdate: string(updateJSON),
+		UserSignature:  req.UserSignature,
+		AppSignature:   appSig,
+		SessionData:    update.SessionData,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if err := s.store.UpsertDepositCheckpoint(ctx, checkpoint); err != nil {
+		return nil, fmt.Errorf("failed to persist deposit checkpoint: %w", err)
+	}
+	pendingAction, err := depositCheckpointAction(checkpoint)
+	if err != nil {
+		return nil, err
+	}
 
 	return &StoreUpdateResponse{
-		Status:       "signed",
-		Intent:       string(StoreIntentUserDeposit),
-		Asset:        asset,
-		AppSessionID: update.AppSessionID,
-		AppSignature: appSig,
+		Status:        "signed",
+		Intent:        string(StoreIntentUserDeposit),
+		Asset:         asset,
+		AppSessionID:  update.AppSessionID,
+		AppSignature:  appSig,
+		PendingAction: pendingAction,
 	}, nil
 }
 
@@ -634,6 +688,55 @@ func (s *WalletStoreService) reconcilePendingPurchases(ctx context.Context, wall
 	return nil
 }
 
+func (s *WalletStoreService) reconcileDepositCheckpoint(ctx context.Context, walletAddress string, asset string, current app.AppSessionInfoV1) (*StorePendingAction, error) {
+	checkpoint, err := s.store.GetActiveDepositCheckpoint(ctx, walletAddress, asset)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to load deposit checkpoint: %w", err)
+	}
+	if checkpoint.AppSessionID != current.AppSessionID {
+		if err := s.store.MarkDepositCheckpointFailed(ctx, checkpoint.ID, s.now().UTC()); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("failed to retire deposit checkpoint: %w", err)
+		}
+		return nil, nil
+	}
+	if current.Version >= checkpoint.Version {
+		if strings.TrimSpace(current.SessionData) == strings.TrimSpace(checkpoint.SessionData) {
+			if err := s.store.MarkDepositCheckpointSubmitted(ctx, checkpoint.ID, s.now().UTC()); err != nil && !errors.Is(err, store.ErrNotFound) {
+				return nil, fmt.Errorf("failed to reconcile deposit checkpoint: %w", err)
+			}
+			return nil, nil
+		}
+		if err := s.store.MarkDepositCheckpointFailed(ctx, checkpoint.ID, s.now().UTC()); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("failed to retire stale deposit checkpoint: %w", err)
+		}
+		return nil, nil
+	}
+	return depositCheckpointAction(*checkpoint)
+}
+
+func depositCheckpointAction(checkpoint store.WalletDepositCheckpoint) (*StorePendingAction, error) {
+	var update rpc.AppStateUpdateV1
+	if err := json.Unmarshal([]byte(checkpoint.AppStateUpdate), &update); err != nil {
+		return nil, fmt.Errorf("failed to decode deposit checkpoint: %w", err)
+	}
+	return &StorePendingAction{
+		Type:           string(StoreIntentUserDeposit),
+		Status:         checkpoint.Status,
+		Asset:          checkpoint.Asset,
+		AppSessionID:   checkpoint.AppSessionID,
+		Version:        checkpoint.Version,
+		Amount:         checkpoint.Amount,
+		AppStateUpdate: update,
+		UserSignature:  checkpoint.UserSignature,
+		AppSignature:   checkpoint.AppSignature,
+		CreatedAt:      checkpoint.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:      checkpoint.UpdatedAt.Format(time.RFC3339),
+	}, nil
+}
+
 func (s *WalletStoreService) walletFromDefinition(definition app.AppDefinitionV1, requestedWallet string) (string, error) {
 	walletAddress := strings.TrimSpace(requestedWallet)
 	for _, participant := range definition.Participants {
@@ -881,6 +984,22 @@ func (s *WalletStoreService) validateDeposit(walletAddress string, asset string,
 		return conflictf("deposit cannot change app allocation")
 	}
 	return nil
+}
+
+func depositAmountForState(walletAddress string, appSignerAddress string, asset string, current *app.AppSessionInfoV1, update app.AppStateUpdateV1) (string, error) {
+	currentUser, _, err := currentBalancesForAsset(current.Allocations, walletAddress, appSignerAddress, asset)
+	if err != nil {
+		return "", err
+	}
+	nextUser, _, err := strictBalancesForAsset(update.Allocations, walletAddress, appSignerAddress, asset)
+	if err != nil {
+		return "", err
+	}
+	amount := nextUser.Sub(currentUser)
+	if !amount.IsPositive() {
+		return "", conflictf("deposit amount must be positive")
+	}
+	return amount.String(), nil
 }
 
 func (s *WalletStoreService) ensureApp(ctx context.Context) error {

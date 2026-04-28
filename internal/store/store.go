@@ -81,6 +81,22 @@ func (s *Store) migrate(ctx context.Context) error {
 			purchased_at DATETIME NOT NULL,
 			UNIQUE(wallet_address, item_id, asset)
 		);`,
+		`CREATE TABLE IF NOT EXISTS wallet_deposit_checkpoints (
+			id TEXT PRIMARY KEY,
+			wallet_address TEXT NOT NULL,
+			asset TEXT NOT NULL,
+			app_session_id TEXT NOT NULL,
+			version INTEGER NOT NULL,
+			amount TEXT NOT NULL,
+			status TEXT NOT NULL,
+			app_state_update TEXT NOT NULL,
+			user_signature TEXT NOT NULL,
+			app_signature TEXT NOT NULL,
+			session_data TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			UNIQUE(wallet_address, asset)
+		);`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {

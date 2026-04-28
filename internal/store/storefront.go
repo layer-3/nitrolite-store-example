@@ -36,10 +36,30 @@ type WalletPurchase struct {
 	PurchasedAt   time.Time `json:"purchased_at"`
 }
 
+type WalletDepositCheckpoint struct {
+	ID             string
+	WalletAddress  string
+	Asset          string
+	AppSessionID   string
+	Version        uint64
+	Amount         string
+	Status         string
+	AppStateUpdate string
+	UserSignature  string
+	AppSignature   string
+	SessionData    string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
 const (
 	WalletPurchaseStatusPending   = "pending"
 	WalletPurchaseStatusSubmitted = "submitted"
 	WalletPurchaseStatusFailed    = "failed"
+
+	WalletDepositCheckpointStatusAppSigned = "app_signed"
+	WalletDepositCheckpointStatusSubmitted = "submitted"
+	WalletDepositCheckpointStatusFailed    = "failed"
 )
 
 func (s *Store) UpsertWalletSession(ctx context.Context, session WalletStoreSession) error {
@@ -210,6 +230,74 @@ func (s *Store) ListPurchasesByWallet(ctx context.Context, walletAddress string,
 	return out, rows.Err()
 }
 
+func (s *Store) UpsertDepositCheckpoint(ctx context.Context, checkpoint WalletDepositCheckpoint) error {
+	createdAt := checkpoint.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = s.now().UTC()
+	}
+	updatedAt := checkpoint.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = createdAt
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO wallet_deposit_checkpoints (
+			id, wallet_address, asset, app_session_id, version, amount, status, app_state_update, user_signature, app_signature, session_data, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(wallet_address, asset) DO UPDATE SET
+			id = excluded.id,
+			app_session_id = excluded.app_session_id,
+			version = excluded.version,
+			amount = excluded.amount,
+			status = excluded.status,
+			app_state_update = excluded.app_state_update,
+			user_signature = excluded.user_signature,
+			app_signature = excluded.app_signature,
+			session_data = excluded.session_data,
+			created_at = excluded.created_at,
+			updated_at = excluded.updated_at
+	`, checkpoint.ID, checkpoint.WalletAddress, checkpoint.Asset, checkpoint.AppSessionID, checkpoint.Version, checkpoint.Amount, checkpoint.Status, checkpoint.AppStateUpdate, checkpoint.UserSignature, checkpoint.AppSignature, checkpoint.SessionData, formatTime(createdAt), formatTime(updatedAt))
+	return err
+}
+
+func (s *Store) GetActiveDepositCheckpoint(ctx context.Context, walletAddress string, asset string) (*WalletDepositCheckpoint, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, wallet_address, asset, app_session_id, version, amount, status, app_state_update, user_signature, app_signature, session_data, created_at, updated_at
+		FROM wallet_deposit_checkpoints
+		WHERE wallet_address = ? AND asset = ? AND status = ?
+	`, walletAddress, asset, WalletDepositCheckpointStatusAppSigned)
+	return scanWalletDepositCheckpoint(row)
+}
+
+func (s *Store) MarkDepositCheckpointSubmitted(ctx context.Context, id string, updatedAt time.Time) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE wallet_deposit_checkpoints
+		SET status = ?, updated_at = ?
+		WHERE id = ? AND status = ?
+	`, WalletDepositCheckpointStatusSubmitted, formatTime(updatedAt), id, WalletDepositCheckpointStatusAppSigned)
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err == nil && changed == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) MarkDepositCheckpointFailed(ctx context.Context, id string, updatedAt time.Time) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE wallet_deposit_checkpoints
+		SET status = ?, updated_at = ?
+		WHERE id = ? AND status = ?
+	`, WalletDepositCheckpointStatusFailed, formatTime(updatedAt), id, WalletDepositCheckpointStatusAppSigned)
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err == nil && changed == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func scanWalletStoreSession(scanner interface{ Scan(dest ...any) error }) (*WalletStoreSession, error) {
 	var session WalletStoreSession
 	var createdAt string
@@ -282,8 +370,48 @@ func scanWalletPurchase(scanner interface{ Scan(dest ...any) error }) (*WalletPu
 	return &purchase, nil
 }
 
+func scanWalletDepositCheckpoint(scanner interface{ Scan(dest ...any) error }) (*WalletDepositCheckpoint, error) {
+	var checkpoint WalletDepositCheckpoint
+	var createdAt string
+	var updatedAt string
+	if err := scanner.Scan(
+		&checkpoint.ID,
+		&checkpoint.WalletAddress,
+		&checkpoint.Asset,
+		&checkpoint.AppSessionID,
+		&checkpoint.Version,
+		&checkpoint.Amount,
+		&checkpoint.Status,
+		&checkpoint.AppStateUpdate,
+		&checkpoint.UserSignature,
+		&checkpoint.AppSignature,
+		&checkpoint.SessionData,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	var err error
+	checkpoint.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return nil, fmt.Errorf("parse wallet deposit checkpoint created_at: %w", err)
+	}
+	checkpoint.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("parse wallet deposit checkpoint updated_at: %w", err)
+	}
+	return &checkpoint, nil
+}
+
 func WalletPurchaseID(walletAddress string, asset string, itemID string) string {
 	return fmt.Sprintf("%s:%s:%s", walletAddress, asset, itemID)
+}
+
+func WalletDepositCheckpointID(walletAddress string, asset string) string {
+	return fmt.Sprintf("%s:%s:deposit", walletAddress, asset)
 }
 
 func isSQLiteUniqueError(err error) bool {
