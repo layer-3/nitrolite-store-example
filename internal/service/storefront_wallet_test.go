@@ -657,6 +657,108 @@ func TestWalletStoreServiceSubmitDepositAcceptsInitialEmptyAllocations(t *testin
 	}
 }
 
+func TestWalletStoreServiceSubmitDepositRejectsAmountAboveAvailableBalance(t *testing.T) {
+	t.Parallel()
+
+	userSigner := mustTestSigner(t)
+	appSigner := mustStoreAppSigner(t)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	currentSession := app.AppSessionInfoV1{
+		AppSessionID: "0xsession",
+		AppDefinition: app.AppDefinitionV1{
+			ApplicationID: "store",
+			Participants: []app.AppParticipantV1{
+				{WalletAddress: userSigner.Address(), SignatureWeight: 1},
+				{WalletAddress: appSigner.Address(), SignatureWeight: 1},
+			},
+			Quorum: 2,
+			Nonce:  1,
+		},
+		Version:     1,
+		SessionData: `{"intent":"init"}`,
+		Allocations: []app.AppAllocationV1{
+			{Participant: userSigner.Address(), Asset: "yusd", Amount: decimal.Zero},
+			{Participant: appSigner.Address(), Asset: "yusd", Amount: decimal.Zero},
+		},
+	}
+	client := &testsupport.FakeClient{
+		GetBalancesFunc: func(context.Context, string) ([]core.BalanceEntry, error) {
+			return []core.BalanceEntry{{Asset: "yusd", Balance: decimal.RequireFromString("0.5")}}, nil
+		},
+		GetAppSessionsFunc: func(context.Context, *sdk.GetAppSessionsOptions) ([]app.AppSessionInfoV1, core.PaginationMetadata, error) {
+			return []app.AppSessionInfoV1{currentSession}, core.PaginationMetadata{}, nil
+		},
+	}
+	manager := nitrolite.NewManagerWithClient(client, nitrolite.Health{
+		Connected:     true,
+		Ready:         true,
+		SignerAddress: appSigner.Address(),
+	}, slog.Default())
+	appStore, err := store.New(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = appStore.Close() })
+
+	service := NewWalletStoreService(manager, appStore, appSigner, "Nitrolite App Session Store", "store", map[string]uint64{"yusd": 11155111}, "wss://example.invalid")
+	service.now = func() time.Time { return now }
+	if err := appStore.UpsertWalletSession(context.Background(), store.WalletStoreSession{
+		WalletAddress:  userSigner.Address(),
+		Asset:          "yusd",
+		AppSessionID:   currentSession.AppSessionID,
+		Status:         "open",
+		Version:        currentSession.Version,
+		UserAllocation: "0",
+		AppAllocation:  "0",
+		SessionData:    currentSession.SessionData,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}); err != nil {
+		t.Fatalf("UpsertWalletSession() error = %v", err)
+	}
+
+	update := app.AppStateUpdateV1{
+		AppSessionID: currentSession.AppSessionID,
+		Intent:       app.AppStateUpdateIntentDeposit,
+		Version:      2,
+		Allocations: []app.AppAllocationV1{
+			{Participant: userSigner.Address(), Asset: "yusd", Amount: decimal.RequireFromString("1.0")},
+			{Participant: appSigner.Address(), Asset: "yusd", Amount: decimal.Zero},
+		},
+		SessionData: `{"intent":"user_deposit","amount":"1"}`,
+	}
+	userSig, err := signAppStateUpdate(update, userSigner)
+	if err != nil {
+		t.Fatalf("signAppStateUpdate() error = %v", err)
+	}
+	rpcUpdate := rpc.AppStateUpdateV1{
+		AppSessionID: update.AppSessionID,
+		Intent:       update.Intent,
+		Version:      "2",
+		Allocations: []rpc.AppAllocationV1{
+			{Participant: userSigner.Address(), Asset: "yusd", Amount: "1.0"},
+			{Participant: appSigner.Address(), Asset: "yusd", Amount: "0"},
+		},
+		SessionData: update.SessionData,
+	}
+
+	_, err = service.SubmitUpdate(context.Background(), StoreUpdateRequest{
+		Asset:          "yusd",
+		AppStateUpdate: &rpcUpdate,
+		UserSignature:  userSig,
+	})
+	if err == nil {
+		t.Fatal("SubmitUpdate() accepted over-balance deposit")
+	}
+	var conflict ConflictError
+	if !errors.As(err, &conflict) || conflict.Code() != "insufficient_balance" {
+		t.Fatalf("SubmitUpdate() error = %#v, want insufficient_balance conflict", err)
+	}
+	if _, err := appStore.GetActiveDepositCheckpoint(context.Background(), userSigner.Address(), "yusd"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("active checkpoint error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestWalletStoreServiceBootstrapReconcilesDepositCheckpoint(t *testing.T) {
 	t.Parallel()
 

@@ -11,7 +11,7 @@ The shopper flow is intentionally narrow:
 5. Read purchased content.
 6. Withdraw remaining store balance.
 
-`YUSD` is the canonical flow from the source story. `YELLOW` is also exposed as a second testnet asset so the same wallet/session flows can be exercised against another configured asset before mainnet asset names are finalized.
+`YUSD` is the default walkthrough asset. `YELLOW` is also exposed as a second testnet asset so the same wallet/session flows can be exercised against another configured asset before mainnet asset names are finalized.
 
 ## Surfaces
 
@@ -73,7 +73,7 @@ If the browser is closed or the Clearnode submit times out after step 9, bootstr
 4. Frontend signs with MetaMask and calls `POST /api/store/update`.
 5. Backend verifies, app-signs, submits with `sdkClient.SubmitAppState`, and returns refreshed bootstrap data.
 
-The source story names `submitAppSessionDeposit` in the withdraw step, but that function is deposit-specific. Withdraw follows the same source story's backend `SubmitAppState` step.
+`submitAppSessionDeposit` is deposit-specific. Withdraw follows the backend `SubmitAppState` path.
 
 ### Purchase
 
@@ -84,7 +84,7 @@ The source story names `submitAppSessionDeposit` in the withdraw step, but that 
 5. Backend verifies item ownership, catalog price, allocation delta, signature, and session version.
 6. Backend app-signs, submits with `sdkClient.SubmitAppState`, records ownership, and returns refreshed bootstrap data.
 
-The source story names `submitAppSessionDeposit` in the purchase step as well. This implementation uses backend `SubmitAppState` because purchase is not a deposit operation.
+Purchase uses backend `SubmitAppState` because it is not a deposit operation.
 
 ### Open Purchased Content
 

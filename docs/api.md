@@ -11,7 +11,7 @@ Query:
 
 Returns store metadata, supported assets, available Clearnode balance, catalog, current wallet session state, wallet-owned library items, and an optional pending deposit action.
 
-Supported demo assets are `yusd` and `yellow`. `yusd` is the source-story path; `yellow` is retained as a second testnet asset for the same app-session flows.
+Supported demo assets are `yusd` and `yellow`. `yusd` is the default walkthrough asset; `yellow` is retained as a second testnet asset for the same app-session flows.
 
 ## `POST /api/store/init`
 

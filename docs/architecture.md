@@ -32,7 +32,7 @@ It supports:
 - The app session has exactly two participants: shopper wallet and store app signer.
 - Each participant has signature weight `1`.
 - Quorum is `2`.
-- Purchases are keyed by wallet, item, and asset. Deposit checkpoints are keyed by wallet and asset and hold the signed payload until the Clearnode session catches up. The active demo assets are `yusd` and `yellow`; `yusd` remains the source-story reference path.
+- Purchases are keyed by wallet, item, and asset. Deposit checkpoints are keyed by wallet and asset and hold the signed payload until the Clearnode session catches up. The active demo assets are `yusd` and `yellow`; `yusd` is the default walkthrough path.
 
 ## Submission Boundaries
 

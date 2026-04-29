@@ -238,12 +238,17 @@ function formatAmount(value: string): string {
   return new Decimal(value || '0').toFixed()
 }
 
-function isPositiveAmount(value: string): boolean {
+function parseDecimal(value: string): Decimal | null {
   try {
-    return new Decimal(value).isPositive()
+    const amount = new Decimal(value)
+    return amount.isFinite() ? amount : null
   } catch {
-    return false
+    return null
   }
+}
+
+function isPositiveAmount(value: string): boolean {
+  return parseDecimal(value)?.isPositive() ?? false
 }
 
 function parseSessionDataLabel(sessionData?: string): string {
@@ -409,9 +414,14 @@ export default function App() {
   }, [bootstrap])
   const sessionReady = Boolean(bootstrap?.session.app_session_id && bootstrap.session.status === 'open')
   const pendingDeposit = bootstrap?.pending_action?.type === 'user_deposit' ? bootstrap.pending_action : null
-  const canDeposit = Boolean(walletAddress && sessionReady && busy === null && !pendingDeposit && isPositiveAmount(depositAmount))
+  const availableBalance = useMemo(() => parseDecimal(bootstrap?.available_balance ?? '0') ?? new Decimal(0), [bootstrap?.available_balance])
+  const depositValue = useMemo(() => parseDecimal(depositAmount), [depositAmount])
+  const pendingDepositValue = useMemo(() => (pendingDeposit ? parseDecimal(pendingDeposit.amount) : null), [pendingDeposit])
+  const depositExceedsAvailable = Boolean(bootstrap && depositValue?.isPositive() && depositValue.greaterThan(availableBalance))
+  const pendingDepositExceedsAvailable = Boolean(bootstrap && pendingDepositValue?.isPositive() && pendingDepositValue.greaterThan(availableBalance))
+  const canDeposit = Boolean(walletAddress && sessionReady && busy === null && isPositiveAmount(depositAmount) && !depositExceedsAvailable)
   const canWithdraw = Boolean(walletAddress && sessionReady && busy === null && isPositiveAmount(withdrawAmount))
-  const canResumeDeposit = Boolean(walletAddress && nitroliteClient && pendingDeposit && busy === null)
+  const canResumeDeposit = Boolean(walletAddress && nitroliteClient && pendingDeposit && busy === null && !pendingDepositExceedsAvailable)
 
   function appendLog(line: string) {
     const stamped = `${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} ${line}`
@@ -698,6 +708,7 @@ export default function App() {
   async function finishDeposit(appStateUpdate: AppStateUpdateV1, userSignature: Hex, appSignature: Hex, asset: string, amount: Decimal) {
     if (!nitroliteClient) throw new Error('Connect a wallet before submitting the deposit.')
     appendLog(`deposit signed ${amount.toFixed()} ${asset.toUpperCase()}; submitting`)
+    await ensureHomeChannelReady(asset)
     await withTimeout(
       nitroliteClient.submitAppSessionDeposit(appStateUpdate, [userSignature, appSignature], asset, amount),
       DEPOSIT_SUBMIT_TIMEOUT_MS,
@@ -705,6 +716,16 @@ export default function App() {
     )
     await refreshBootstrap(asset)
     appendLog(`deposit ${amount.toFixed()} ${asset.toUpperCase()} submitted`)
+  }
+
+  async function ensureHomeChannelReady(asset: string) {
+    if (!nitroliteClient || !walletAddress) throw new Error('Connect a wallet before submitting the deposit.')
+    try {
+      await nitroliteClient.getLatestState(walletAddress as Address, asset, false)
+    } catch {
+      appendLog(`opening ${asset.toUpperCase()} channel`)
+      await nitroliteClient.acknowledge(asset)
+    }
   }
 
   async function resumeDeposit() {
@@ -741,6 +762,10 @@ export default function App() {
       const amount = new Decimal(depositAmount)
       if (!amount.isPositive()) {
         throw new Error('Deposit amount must be greater than zero.')
+      }
+      const available = new Decimal(bootstrap.available_balance || '0')
+      if (amount.greaterThan(available)) {
+        throw new Error(`Deposit amount exceeds your available ${bootstrap.selected_asset.toUpperCase()} balance.`)
       }
       const version = bootstrap.session.version + 1
       const currentUser = new Decimal(bootstrap.session.user_allocation)
@@ -942,7 +967,9 @@ export default function App() {
                   Deposit checkpoint ready
                 </p>
                 <p className="mt-1 text-sm font-semibold leading-5 text-black/60">
-                  {formatAmount(pendingDeposit.amount)} {pendingDeposit.asset.toUpperCase()} is signed at version {pendingDeposit.version}. Resume submits it to Clearnode without another MetaMask prompt.
+                  {pendingDepositExceedsAvailable
+                    ? `${formatAmount(pendingDeposit.amount)} ${pendingDeposit.asset.toUpperCase()} exceeds the current available balance. Enter a smaller deposit to replace it, or top up before resuming.`
+                    : `${formatAmount(pendingDeposit.amount)} ${pendingDeposit.asset.toUpperCase()} is signed at version ${pendingDeposit.version}. Resume submits it to Clearnode without another MetaMask prompt.`}
                 </p>
               </div>
               <ActionButton
@@ -973,6 +1000,13 @@ export default function App() {
                 required
                 aria-label={`Deposit amount in ${selectedAsset.toUpperCase()}`}
               />
+              {depositExceedsAvailable ? (
+                <span className="text-xs font-bold leading-5 text-red-700">
+                  Available balance is {formatAmount(bootstrap?.available_balance ?? '0')} {selectedAsset.toUpperCase()}.
+                </span>
+              ) : pendingDeposit ? (
+                <span className="text-xs font-bold leading-5 text-black/50">A new deposit replaces the pending checkpoint.</span>
+              ) : null}
             </label>
             <ActionButton
               className="self-end"

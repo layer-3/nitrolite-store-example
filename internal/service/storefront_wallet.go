@@ -13,6 +13,7 @@ import (
 	"github.com/layer-3/nitrolite/pkg/app"
 	"github.com/layer-3/nitrolite/pkg/rpc"
 	sdk "github.com/layer-3/nitrolite/sdk/go"
+	"github.com/shopspring/decimal"
 )
 
 type StoreBootstrapResponse struct {
@@ -376,6 +377,14 @@ func (s *WalletStoreService) submitDeposit(ctx context.Context, asset string, re
 		return nil, err
 	}
 
+	amount, err := depositAmountForState(walletAddress, s.appSigner.Address(), asset, current, update)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.ensureDepositAvailable(ctx, walletAddress, asset, amount); err != nil {
+		return nil, err
+	}
+
 	appSig, err := signAppStateUpdate(update, s.appSigner)
 	if err != nil {
 		return nil, err
@@ -383,10 +392,6 @@ func (s *WalletStoreService) submitDeposit(ctx context.Context, asset string, re
 	updateJSON, err := json.Marshal(req.AppStateUpdate)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode deposit checkpoint: %w", err)
-	}
-	amount, err := depositAmountForState(walletAddress, s.appSigner.Address(), asset, current, update)
-	if err != nil {
-		return nil, err
 	}
 	now := s.now().UTC()
 	checkpoint := store.WalletDepositCheckpoint{
@@ -982,6 +987,26 @@ func (s *WalletStoreService) validateDeposit(walletAddress string, asset string,
 	}
 	if !nextApp.Equal(currentApp) {
 		return conflictf("deposit cannot change app allocation")
+	}
+	return nil
+}
+
+func (s *WalletStoreService) ensureDepositAvailable(ctx context.Context, walletAddress string, asset string, amount string) error {
+	depositAmount, err := decimal.NewFromString(strings.TrimSpace(amount))
+	if err != nil {
+		return fmt.Errorf("failed to parse deposit amount: %w", err)
+	}
+
+	availableRaw, err := s.availableBalance(ctx, walletAddress, asset)
+	if err != nil {
+		return err
+	}
+	availableAmount, err := decimal.NewFromString(strings.TrimSpace(availableRaw))
+	if err != nil {
+		return fmt.Errorf("failed to parse available balance: %w", err)
+	}
+	if depositAmount.GreaterThan(availableAmount) {
+		return conflictCodef("insufficient_balance", "deposit exceeds available balance")
 	}
 	return nil
 }
