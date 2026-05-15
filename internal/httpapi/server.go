@@ -19,7 +19,16 @@ func NewHandler(cfg *config.Config, manager *nitrolite.Manager, _ signing.Signer
 		return nil, err
 	}
 
-	storefront := service.NewWalletStoreService(manager, appStore, appSigner, cfg.StoreName, cfg.StoreAppID, cfg.HomeBlockchains, cfg.ClearnodeWSURL)
+	storefront := service.NewWalletStoreService(
+		manager,
+		appStore,
+		appSigner,
+		cfg.StoreName,
+		cfg.StoreAppID,
+		cfg.HomeBlockchains,
+		cfg.ClearnodeWSURL,
+		cfg.StoreChannelBootstrapAmounts,
+	)
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", healthHandler(manager))

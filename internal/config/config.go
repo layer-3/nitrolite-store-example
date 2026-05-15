@@ -10,16 +10,17 @@ import (
 
 // Config contains runtime configuration for the example service.
 type Config struct {
-	Port               string
-	LogLevel           string
-	ClearnodeWSURL     string
-	DemoPrivateKey     string
-	SQLitePath         string
-	StoreName          string
-	StoreAppID         string
-	StoreAppPrivateKey string
-	BlockchainRPCURLs  map[string]string
-	HomeBlockchains    map[string]uint64
+	Port                         string
+	LogLevel                     string
+	ClearnodeWSURL               string
+	DemoPrivateKey               string
+	SQLitePath                   string
+	StoreName                    string
+	StoreAppID                   string
+	StoreAppPrivateKey           string
+	BlockchainRPCURLs            map[string]string
+	HomeBlockchains              map[string]uint64
+	StoreChannelBootstrapAmounts map[string]string
 }
 
 // Load reads process env and an optional .env file into a validated Config.
@@ -37,6 +38,10 @@ func Load(dotenvPath string) (*Config, error) {
 		StoreName:          getEnv("STORE_NAME", "Nitrolite App Session Store"),
 		StoreAppID:         getEnv("STORE_APP_ID", "default"),
 		StoreAppPrivateKey: strings.TrimSpace(os.Getenv("STORE_APP_PRIVATE_KEY")),
+		StoreChannelBootstrapAmounts: map[string]string{
+			"yusd":   "10",
+			"yellow": "10",
+		},
 	}
 
 	if err := parseJSONEnv("BLOCKCHAIN_RPC_URLS", &cfg.BlockchainRPCURLs); err != nil {
@@ -44,6 +49,11 @@ func Load(dotenvPath string) (*Config, error) {
 	}
 	if err := parseJSONEnv("HOME_BLOCKCHAINS", &cfg.HomeBlockchains); err != nil {
 		return nil, err
+	}
+	if raw := strings.TrimSpace(os.Getenv("STORE_CHANNEL_BOOTSTRAP_AMOUNTS")); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &cfg.StoreChannelBootstrapAmounts); err != nil {
+			return nil, fmt.Errorf("invalid STORE_CHANNEL_BOOTSTRAP_AMOUNTS: %w", err)
+		}
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -70,6 +80,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("missing BLOCKCHAIN_RPC_URLS")
 	case len(c.HomeBlockchains) == 0:
 		return fmt.Errorf("missing HOME_BLOCKCHAINS")
+	}
+	if len(c.StoreChannelBootstrapAmounts) == 0 {
+		return fmt.Errorf("missing STORE_CHANNEL_BOOTSTRAP_AMOUNTS")
 	}
 
 	return nil

@@ -28,6 +28,36 @@ const (
 	serviceUserPrivateKey = "0x59c6995e998f97a5a0044976f094538fcb963c90d6f9fbfc7f3a6fcd45d9c25"
 )
 
+func fundedHomeState(wallet string, asset string, balance string) *core.State {
+	homeChannelID := "0xhome"
+	return &core.State{
+		ID:            "0xstate",
+		Asset:         asset,
+		UserWallet:    wallet,
+		HomeChannelID: &homeChannelID,
+		HomeLedger: core.Ledger{
+			UserBalance: decimal.RequireFromString(balance),
+			UserNetFlow: decimal.RequireFromString(balance),
+			NodeBalance: decimal.Zero,
+			NodeNetFlow: decimal.Zero,
+		},
+	}
+}
+
+func receivedOffchainState(wallet string, asset string, balance string) *core.State {
+	return &core.State{
+		ID:         "0xreceived",
+		Asset:      asset,
+		UserWallet: wallet,
+		HomeLedger: core.Ledger{
+			UserBalance: decimal.RequireFromString(balance),
+			UserNetFlow: decimal.RequireFromString(balance),
+			NodeBalance: decimal.Zero,
+			NodeNetFlow: decimal.Zero,
+		},
+	}
+}
+
 func TestWalletStoreServiceCreateSessionForwardsExactPayload(t *testing.T) {
 	t.Parallel()
 
@@ -37,11 +67,8 @@ func TestWalletStoreServiceCreateSessionForwardsExactPayload(t *testing.T) {
 		GetAppsFunc: func(context.Context, *sdk.GetAppsOptions) ([]app.AppInfoV1, core.PaginationMetadata, error) {
 			return []app.AppInfoV1{{App: app.AppV1{ID: "store"}}}, core.PaginationMetadata{}, nil
 		},
-		GetBalancesFunc: func(context.Context, string) ([]core.BalanceEntry, error) {
-			return []core.BalanceEntry{
-				{Asset: "yusd", Balance: decimal.RequireFromString("7")},
-				{Asset: "yellow", Balance: decimal.RequireFromString("7")},
-			}, nil
+		GetLatestStateFunc: func(_ context.Context, wallet string, asset string, _ bool) (*core.State, error) {
+			return fundedHomeState(wallet, asset, "7"), nil
 		},
 	}
 	manager := nitrolite.NewManagerWithClient(client, nitrolite.Health{
@@ -123,6 +150,345 @@ func TestWalletStoreServiceCreateSessionForwardsExactPayload(t *testing.T) {
 	}
 	if resp.Session.AppSessionID != currentSession.AppSessionID || resp.Session.Status != "open" {
 		t.Fatalf("unexpected response session = %#v", resp.Session)
+	}
+}
+
+func TestWalletStoreServiceCreateSessionRequiresFundedHomeChannel(t *testing.T) {
+	t.Parallel()
+
+	userSigner := mustTestSigner(t)
+	appSigner := mustStoreAppSigner(t)
+	client := &testsupport.FakeClient{
+		GetAppsFunc: func(context.Context, *sdk.GetAppsOptions) ([]app.AppInfoV1, core.PaginationMetadata, error) {
+			return []app.AppInfoV1{{App: app.AppV1{ID: "store"}}}, core.PaginationMetadata{}, nil
+		},
+		GetLatestStateFunc: func(context.Context, string, string, bool) (*core.State, error) {
+			return nil, nil
+		},
+	}
+	manager := nitrolite.NewManagerWithClient(client, nitrolite.Health{
+		Connected:     true,
+		Ready:         true,
+		SignerAddress: appSigner.Address(),
+	}, slog.Default())
+	appStore, err := store.New(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = appStore.Close() })
+
+	service := NewWalletStoreService(manager, appStore, appSigner, "Nitrolite App Session Store", "store", map[string]uint64{"yusd": 11155111}, "wss://example.invalid")
+	service.createAppSessionRPC = func(context.Context, string, rpc.AppSessionsV1CreateAppSessionRequest) (*rpc.AppSessionsV1CreateAppSessionResponse, error) {
+		t.Fatal("createAppSessionRPC must not be called without a funded home channel")
+		return nil, nil
+	}
+
+	definition := app.AppDefinitionV1{
+		ApplicationID: "store",
+		Participants: []app.AppParticipantV1{
+			{WalletAddress: userSigner.Address(), SignatureWeight: 1},
+			{WalletAddress: appSigner.Address(), SignatureWeight: 1},
+		},
+		Quorum: 2,
+		Nonce:  1,
+	}
+	sessionData := `{"intent":"init"}`
+	userSig, err := signCreateAppSessionRequest(definition, sessionData, userSigner)
+	if err != nil {
+		t.Fatalf("signCreateAppSessionRequest() error = %v", err)
+	}
+
+	_, err = service.CreateSession(context.Background(), StoreInitRequest{
+		Asset: "yusd",
+		Definition: rpc.AppDefinitionV1{
+			Application: "store",
+			Participants: []rpc.AppParticipantV1{
+				{WalletAddress: userSigner.Address(), SignatureWeight: 1},
+				{WalletAddress: appSigner.Address(), SignatureWeight: 1},
+			},
+			Quorum: 2,
+			Nonce:  "1",
+		},
+		SessionData:   sessionData,
+		UserSignature: userSig,
+	})
+	if err == nil {
+		t.Fatal("CreateSession() accepted a wallet without a funded home channel")
+	}
+	var conflict ConflictError
+	if !errors.As(err, &conflict) || conflict.Code() != "channel_funds_required" {
+		t.Fatalf("CreateSession() error = %#v, want channel_funds_required conflict", err)
+	}
+}
+
+func TestWalletStoreServiceBootstrapReportsAckRequiredChannel(t *testing.T) {
+	t.Parallel()
+
+	appSigner := mustStoreAppSigner(t)
+	client := &testsupport.FakeClient{
+		GetLatestStateFunc: func(_ context.Context, wallet string, asset string, signed bool) (*core.State, error) {
+			if signed {
+				return nil, errors.New("signed state not found")
+			}
+			return fundedHomeState(wallet, asset, "5"), nil
+		},
+	}
+	manager := nitrolite.NewManagerWithClient(client, nitrolite.Health{
+		Connected:     true,
+		Ready:         true,
+		SignerAddress: appSigner.Address(),
+	}, slog.Default())
+	appStore, err := store.New(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = appStore.Close() })
+
+	service := NewWalletStoreService(manager, appStore, appSigner, "Nitrolite App Session Store", "store", map[string]uint64{"yusd": 11155111}, "wss://example.invalid")
+	resp, err := service.Bootstrap(context.Background(), "0x1111111111111111111111111111111111111111", "yusd")
+	if err != nil {
+		t.Fatalf("Bootstrap() error = %v", err)
+	}
+	if resp.ChannelReadiness.Status != "ack_required" {
+		t.Fatalf("channel_readiness.status = %q, want ack_required", resp.ChannelReadiness.Status)
+	}
+	if resp.AvailableBalance != "0" {
+		t.Fatalf("available_balance = %q, want 0", resp.AvailableBalance)
+	}
+	if resp.ChannelReadiness.PendingBalance != "5" {
+		t.Fatalf("pending_balance = %q, want 5", resp.ChannelReadiness.PendingBalance)
+	}
+	if resp.ChannelReadiness.RequiresChannelCreation {
+		t.Fatal("requires_channel_creation = true, want false")
+	}
+}
+
+func TestWalletStoreServiceBootstrapReportsAckRequiredForReceivedFundsWithoutHomeChannel(t *testing.T) {
+	t.Parallel()
+
+	appSigner := mustStoreAppSigner(t)
+	client := &testsupport.FakeClient{
+		GetLatestStateFunc: func(_ context.Context, wallet string, asset string, signed bool) (*core.State, error) {
+			if signed {
+				return nil, errors.New("signed state not found")
+			}
+			return receivedOffchainState(wallet, asset, "5"), nil
+		},
+	}
+	manager := nitrolite.NewManagerWithClient(client, nitrolite.Health{
+		Connected:     true,
+		Ready:         true,
+		SignerAddress: appSigner.Address(),
+	}, slog.Default())
+	appStore, err := store.New(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = appStore.Close() })
+
+	service := NewWalletStoreService(manager, appStore, appSigner, "Nitrolite App Session Store", "store", map[string]uint64{"yusd": 11155111}, "wss://example.invalid")
+	resp, err := service.Bootstrap(context.Background(), "0x1111111111111111111111111111111111111111", "yusd")
+	if err != nil {
+		t.Fatalf("Bootstrap() error = %v", err)
+	}
+	if resp.ChannelReadiness.Status != "ack_required" {
+		t.Fatalf("channel_readiness.status = %q, want ack_required", resp.ChannelReadiness.Status)
+	}
+	if !resp.ChannelReadiness.RequiresChannelCreation {
+		t.Fatal("requires_channel_creation = false, want true")
+	}
+	if resp.AvailableBalance != "0" {
+		t.Fatalf("available_balance = %q, want 0", resp.AvailableBalance)
+	}
+	if resp.ChannelReadiness.PendingBalance != "5" {
+		t.Fatalf("pending_balance = %q, want 5", resp.ChannelReadiness.PendingBalance)
+	}
+}
+
+func TestWalletStoreServiceBootstrapKeepsSignedNoHomeChannelStateInSetup(t *testing.T) {
+	t.Parallel()
+
+	appSigner := mustStoreAppSigner(t)
+	userSig := "0xsigned"
+	client := &testsupport.FakeClient{
+		GetLatestStateFunc: func(_ context.Context, wallet string, asset string, _ bool) (*core.State, error) {
+			state := receivedOffchainState(wallet, asset, "5")
+			state.UserSig = &userSig
+			return state, nil
+		},
+	}
+	manager := nitrolite.NewManagerWithClient(client, nitrolite.Health{
+		Connected:     true,
+		Ready:         true,
+		SignerAddress: appSigner.Address(),
+	}, slog.Default())
+	appStore, err := store.New(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = appStore.Close() })
+
+	service := NewWalletStoreService(manager, appStore, appSigner, "Nitrolite App Session Store", "store", map[string]uint64{"yusd": 11155111}, "wss://example.invalid")
+	resp, err := service.Bootstrap(context.Background(), "0x1111111111111111111111111111111111111111", "yusd")
+	if err != nil {
+		t.Fatalf("Bootstrap() error = %v", err)
+	}
+	if resp.ChannelReadiness.Status != "ack_required" {
+		t.Fatalf("channel_readiness.status = %q, want ack_required", resp.ChannelReadiness.Status)
+	}
+	if !resp.ChannelReadiness.RequiresChannelCreation {
+		t.Fatal("requires_channel_creation = false, want true")
+	}
+	if resp.AvailableBalance != "0" {
+		t.Fatalf("available_balance = %q, want 0", resp.AvailableBalance)
+	}
+}
+
+func TestWalletStoreServiceBootstrapReportsAckRequiredWhenPendingReleaseIsNewer(t *testing.T) {
+	t.Parallel()
+
+	appSigner := mustStoreAppSigner(t)
+	userSig := "0xsigned"
+	client := &testsupport.FakeClient{
+		GetLatestStateFunc: func(_ context.Context, wallet string, asset string, signed bool) (*core.State, error) {
+			if signed {
+				state := fundedHomeState(wallet, asset, "0.5")
+				state.ID = "0xsignedstate"
+				state.Version = 4
+				state.UserSig = &userSig
+				return state, nil
+			}
+			state := fundedHomeState(wallet, asset, "10")
+			state.ID = "0xpendingrelease"
+			state.Version = 5
+			state.Transition.Type = core.TransitionTypeRelease
+			state.Transition.Amount = decimal.RequireFromString("9.5")
+			return state, nil
+		},
+	}
+	manager := nitrolite.NewManagerWithClient(client, nitrolite.Health{
+		Connected:     true,
+		Ready:         true,
+		SignerAddress: appSigner.Address(),
+	}, slog.Default())
+	appStore, err := store.New(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = appStore.Close() })
+
+	service := NewWalletStoreService(manager, appStore, appSigner, "Nitrolite App Session Store", "store", map[string]uint64{"yellow": 11155111}, "wss://example.invalid")
+	resp, err := service.Bootstrap(context.Background(), "0x1111111111111111111111111111111111111111", "yellow")
+	if err != nil {
+		t.Fatalf("Bootstrap() error = %v", err)
+	}
+	if resp.ChannelReadiness.Status != "ack_required" {
+		t.Fatalf("channel_readiness.status = %q, want ack_required", resp.ChannelReadiness.Status)
+	}
+	if resp.AvailableBalance != "0.5" {
+		t.Fatalf("available_balance = %q, want 0.5", resp.AvailableBalance)
+	}
+	if resp.ChannelReadiness.PendingBalance != "10" {
+		t.Fatalf("pending_balance = %q, want 10", resp.ChannelReadiness.PendingBalance)
+	}
+	if resp.ChannelReadiness.PendingTransition != "release" {
+		t.Fatalf("pending_transition = %q, want release", resp.ChannelReadiness.PendingTransition)
+	}
+	if resp.ChannelReadiness.PendingAmount != "9.5" {
+		t.Fatalf("pending_amount = %q, want 9.5", resp.ChannelReadiness.PendingAmount)
+	}
+	if resp.ChannelReadiness.RequiresChannelCreation {
+		t.Fatal("requires_channel_creation = true, want false")
+	}
+}
+
+func TestWalletStoreServiceBootstrapReportsDepositRequiredChannel(t *testing.T) {
+	t.Parallel()
+
+	appSigner := mustStoreAppSigner(t)
+	client := &testsupport.FakeClient{
+		GetLatestStateFunc: func(context.Context, string, string, bool) (*core.State, error) {
+			return nil, errors.New("state not found")
+		},
+		GetOnChainBalanceFunc: func(_ context.Context, chainID uint64, asset string, wallet string) (decimal.Decimal, error) {
+			if chainID != 11155111 {
+				t.Fatalf("chainID = %d, want 11155111", chainID)
+			}
+			if asset != "yellow" {
+				t.Fatalf("asset = %q, want yellow", asset)
+			}
+			if wallet != "0x1111111111111111111111111111111111111111" {
+				t.Fatalf("wallet = %q, want test wallet", wallet)
+			}
+			return decimal.RequireFromString("3"), nil
+		},
+	}
+	manager := nitrolite.NewManagerWithClient(client, nitrolite.Health{
+		Connected:     true,
+		Ready:         true,
+		SignerAddress: appSigner.Address(),
+	}, slog.Default())
+	appStore, err := store.New(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = appStore.Close() })
+
+	service := NewWalletStoreService(
+		manager,
+		appStore,
+		appSigner,
+		"Nitrolite App Session Store",
+		"store",
+		map[string]uint64{"yellow": 11155111, "yusd": 11155111},
+		"wss://example.invalid",
+		map[string]string{"yellow": "12"},
+	)
+	resp, err := service.Bootstrap(context.Background(), "0x1111111111111111111111111111111111111111", "yellow")
+	if err != nil {
+		t.Fatalf("Bootstrap() error = %v", err)
+	}
+	if resp.ChannelReadiness.Status != "deposit_required" {
+		t.Fatalf("channel_readiness.status = %q, want deposit_required", resp.ChannelReadiness.Status)
+	}
+	if resp.ChannelReadiness.OnChainBalance != "3" {
+		t.Fatalf("on_chain_balance = %q, want 3", resp.ChannelReadiness.OnChainBalance)
+	}
+	if resp.ChannelReadiness.BootstrapAmount != "12" {
+		t.Fatalf("bootstrap_amount = %q, want 12", resp.ChannelReadiness.BootstrapAmount)
+	}
+	if resp.ChannelReadiness.RequiresChannelCreation {
+		t.Fatal("requires_channel_creation = true, want false")
+	}
+}
+
+func TestWalletStoreServiceEnsureAppSkipsDisabledRegistry(t *testing.T) {
+	t.Parallel()
+
+	appSigner := mustStoreAppSigner(t)
+	client := &testsupport.FakeClient{
+		GetAppsFunc: func(context.Context, *sdk.GetAppsOptions) ([]app.AppInfoV1, core.PaginationMetadata, error) {
+			return nil, core.PaginationMetadata{}, errors.New("rpc returned error: apps.v1 group is disabled")
+		},
+		RegisterAppFunc: func(context.Context, string, string, bool) error {
+			t.Fatal("RegisterApp must not be called when apps.v1 is disabled")
+			return nil
+		},
+	}
+	manager := nitrolite.NewManagerWithClient(client, nitrolite.Health{
+		Connected:     true,
+		Ready:         true,
+		SignerAddress: appSigner.Address(),
+	}, slog.Default())
+	appStore, err := store.New(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = appStore.Close() })
+
+	service := NewWalletStoreService(manager, appStore, appSigner, "Nitrolite App Session Store", "store", map[string]uint64{"yusd": 11155111}, "wss://example.invalid")
+	if err := service.ensureApp(context.Background()); err != nil {
+		t.Fatalf("ensureApp() error = %v, want nil when apps.v1 is disabled", err)
 	}
 }
 
@@ -260,8 +626,8 @@ func TestWalletStoreServiceSubmitAppStateForwardsExactPayload(t *testing.T) {
 	userSigner := mustTestSigner(t)
 	appSigner := mustStoreAppSigner(t)
 	client := &testsupport.FakeClient{
-		GetBalancesFunc: func(context.Context, string) ([]core.BalanceEntry, error) {
-			return []core.BalanceEntry{{Asset: "yusd", Balance: decimal.RequireFromString("7")}}, nil
+		GetLatestStateFunc: func(_ context.Context, wallet string, asset string, _ bool) (*core.State, error) {
+			return fundedHomeState(wallet, asset, "7"), nil
 		},
 	}
 	manager := nitrolite.NewManagerWithClient(client, nitrolite.Health{
@@ -374,8 +740,8 @@ func TestWalletStoreServiceSubmitWithdrawAcceptsIntentOnlySessionData(t *testing
 	userSigner := mustTestSigner(t)
 	appSigner := mustStoreAppSigner(t)
 	client := &testsupport.FakeClient{
-		GetBalancesFunc: func(context.Context, string) ([]core.BalanceEntry, error) {
-			return []core.BalanceEntry{{Asset: "yusd", Balance: decimal.RequireFromString("7")}}, nil
+		GetLatestStateFunc: func(_ context.Context, wallet string, asset string, _ bool) (*core.State, error) {
+			return fundedHomeState(wallet, asset, "7"), nil
 		},
 	}
 	manager := nitrolite.NewManagerWithClient(client, nitrolite.Health{
@@ -559,8 +925,8 @@ func TestWalletStoreServiceSubmitDepositAcceptsInitialEmptyAllocations(t *testin
 	userSigner := mustTestSigner(t)
 	appSigner := mustStoreAppSigner(t)
 	client := &testsupport.FakeClient{
-		GetBalancesFunc: func(context.Context, string) ([]core.BalanceEntry, error) {
-			return []core.BalanceEntry{{Asset: "yusd", Balance: decimal.RequireFromString("7")}}, nil
+		GetLatestStateFunc: func(_ context.Context, wallet string, asset string, _ bool) (*core.State, error) {
+			return fundedHomeState(wallet, asset, "7"), nil
 		},
 	}
 	manager := nitrolite.NewManagerWithClient(client, nitrolite.Health{
@@ -682,8 +1048,8 @@ func TestWalletStoreServiceSubmitDepositRejectsAmountAboveAvailableBalance(t *te
 		},
 	}
 	client := &testsupport.FakeClient{
-		GetBalancesFunc: func(context.Context, string) ([]core.BalanceEntry, error) {
-			return []core.BalanceEntry{{Asset: "yusd", Balance: decimal.RequireFromString("0.5")}}, nil
+		GetLatestStateFunc: func(_ context.Context, wallet string, asset string, _ bool) (*core.State, error) {
+			return fundedHomeState(wallet, asset, "0.5"), nil
 		},
 		GetAppSessionsFunc: func(context.Context, *sdk.GetAppSessionsOptions) ([]app.AppSessionInfoV1, core.PaginationMetadata, error) {
 			return []app.AppSessionInfoV1{currentSession}, core.PaginationMetadata{}, nil
@@ -868,8 +1234,8 @@ func TestWalletStoreServiceSubmitPurchaseAcceptsNormalizedPriceString(t *testing
 	userSigner := mustTestSigner(t)
 	appSigner := mustStoreAppSigner(t)
 	client := &testsupport.FakeClient{
-		GetBalancesFunc: func(context.Context, string) ([]core.BalanceEntry, error) {
-			return []core.BalanceEntry{{Asset: "yusd", Balance: decimal.RequireFromString("7")}}, nil
+		GetLatestStateFunc: func(_ context.Context, wallet string, asset string, _ bool) (*core.State, error) {
+			return fundedHomeState(wallet, asset, "7"), nil
 		},
 	}
 	manager := nitrolite.NewManagerWithClient(client, nitrolite.Health{
@@ -1466,8 +1832,8 @@ func newWalletStoreServiceForTest(t *testing.T, userSigner appsigning.Signer, ap
 	t.Helper()
 
 	client := &testsupport.FakeClient{
-		GetBalancesFunc: func(context.Context, string) ([]core.BalanceEntry, error) {
-			return []core.BalanceEntry{{Asset: "yusd", Balance: decimal.RequireFromString("7")}}, nil
+		GetLatestStateFunc: func(_ context.Context, wallet string, asset string, _ bool) (*core.State, error) {
+			return fundedHomeState(wallet, asset, "7"), nil
 		},
 		GetAppSessionsFunc: func(context.Context, *sdk.GetAppSessionsOptions) ([]app.AppSessionInfoV1, core.PaginationMetadata, error) {
 			if currentSession == nil {

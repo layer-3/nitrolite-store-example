@@ -42,8 +42,20 @@ func TestScaffoldRoutes(t *testing.T) {
 	}
 
 	client := &testsupport.FakeClient{
-		GetBalancesFunc: func(context.Context, string) ([]core.BalanceEntry, error) {
-			return []core.BalanceEntry{{Asset: "yusd", Balance: decimal.RequireFromString("10.5")}}, nil
+		GetLatestStateFunc: func(_ context.Context, wallet string, asset string, _ bool) (*core.State, error) {
+			homeChannelID := "0xhome"
+			return &core.State{
+				ID:            "0xstate",
+				Asset:         asset,
+				UserWallet:    wallet,
+				HomeChannelID: &homeChannelID,
+				HomeLedger: core.Ledger{
+					UserBalance: decimal.RequireFromString("10.5"),
+					UserNetFlow: decimal.RequireFromString("10.5"),
+					NodeBalance: decimal.Zero,
+					NodeNetFlow: decimal.Zero,
+				},
+			}, nil
 		},
 	}
 

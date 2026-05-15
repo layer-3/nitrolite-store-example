@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,22 @@ import (
 )
 
 const httpAPITestPrivateKey = "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
+
+func fundedHTTPState(wallet string, asset string, balance string) *core.State {
+	homeChannelID := "0xhome"
+	return &core.State{
+		ID:            "0xstate",
+		Asset:         asset,
+		UserWallet:    wallet,
+		HomeChannelID: &homeChannelID,
+		HomeLedger: core.Ledger{
+			UserBalance: decimal.RequireFromString(balance),
+			UserNetFlow: decimal.RequireFromString(balance),
+			NodeBalance: decimal.Zero,
+			NodeNetFlow: decimal.Zero,
+		},
+	}
+}
 
 func TestStoreBootstrapRequiresWalletAddress(t *testing.T) {
 	t.Parallel()
@@ -48,11 +65,9 @@ func TestStoreBootstrapWithWalletAddress(t *testing.T) {
 
 	walletAddress := "0x1111111111111111111111111111111111111111"
 	handler := newTestHandler(t, &testsupport.FakeClient{
-		GetBalancesFunc: func(context.Context, string) ([]core.BalanceEntry, error) {
-			return []core.BalanceEntry{
-				{Asset: "yusd", Balance: decimal.RequireFromString("7")},
-				{Asset: "yellow", Balance: decimal.RequireFromString("3")},
-			}, nil
+		GetLatestStateFunc: func(_ context.Context, wallet string, asset string, _ bool) (*core.State, error) {
+			balances := map[string]string{"yusd": "7", "yellow": "3"}
+			return fundedHTTPState(wallet, asset, balances[asset]), nil
 		},
 	})
 
@@ -70,7 +85,13 @@ func TestStoreBootstrapWithWalletAddress(t *testing.T) {
 		SelectedAsset    string   `json:"selected_asset"`
 		SupportedAssets  []string `json:"supported_assets"`
 		AvailableBalance string   `json:"available_balance"`
-		Catalog          []struct {
+		ChannelReadiness struct {
+			Status                  string `json:"status"`
+			HomeBlockchainID        uint64 `json:"home_blockchain_id"`
+			BootstrapAmount         string `json:"bootstrap_amount"`
+			RequiresChannelCreation bool   `json:"requires_channel_creation"`
+		} `json:"channel_readiness"`
+		Catalog []struct {
 			ID string `json:"id"`
 		} `json:"catalog"`
 		Session struct {
@@ -95,6 +116,18 @@ func TestStoreBootstrapWithWalletAddress(t *testing.T) {
 	if payload.AvailableBalance != "7" {
 		t.Fatalf("available_balance = %q, want 7", payload.AvailableBalance)
 	}
+	if payload.ChannelReadiness.Status != "ready" {
+		t.Fatalf("channel_readiness.status = %q, want ready", payload.ChannelReadiness.Status)
+	}
+	if payload.ChannelReadiness.HomeBlockchainID != 11155111 {
+		t.Fatalf("channel_readiness.home_blockchain_id = %d, want 11155111", payload.ChannelReadiness.HomeBlockchainID)
+	}
+	if payload.ChannelReadiness.BootstrapAmount != "10" {
+		t.Fatalf("channel_readiness.bootstrap_amount = %q, want 10", payload.ChannelReadiness.BootstrapAmount)
+	}
+	if payload.ChannelReadiness.RequiresChannelCreation {
+		t.Fatal("channel_readiness.requires_channel_creation = true, want false")
+	}
 	if payload.Session.Status != "missing" {
 		t.Fatalf("session.status = %q, want missing", payload.Session.Status)
 	}
@@ -106,16 +139,63 @@ func TestStoreBootstrapWithWalletAddress(t *testing.T) {
 	}
 }
 
+func TestStoreBootstrapReportsReceivedFundsNeedChannelCreation(t *testing.T) {
+	t.Parallel()
+
+	walletAddress := "0x1111111111111111111111111111111111111111"
+	handler := newTestHandler(t, &testsupport.FakeClient{
+		GetLatestStateFunc: func(_ context.Context, wallet string, asset string, signed bool) (*core.State, error) {
+			if signed {
+				return nil, errors.New("signed state not found")
+			}
+			state := fundedHTTPState(wallet, asset, "5")
+			state.HomeChannelID = nil
+			return state, nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/store/bootstrap?asset=yusd&wallet_address="+walletAddress, nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload struct {
+		AvailableBalance string `json:"available_balance"`
+		ChannelReadiness struct {
+			Status                  string `json:"status"`
+			PendingBalance          string `json:"pending_balance"`
+			RequiresChannelCreation bool   `json:"requires_channel_creation"`
+		} `json:"channel_readiness"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if payload.ChannelReadiness.Status != "ack_required" {
+		t.Fatalf("channel_readiness.status = %q, want ack_required", payload.ChannelReadiness.Status)
+	}
+	if !payload.ChannelReadiness.RequiresChannelCreation {
+		t.Fatal("channel_readiness.requires_channel_creation = false, want true")
+	}
+	if payload.AvailableBalance != "0" {
+		t.Fatalf("available_balance = %q, want 0", payload.AvailableBalance)
+	}
+	if payload.ChannelReadiness.PendingBalance != "5" {
+		t.Fatalf("channel_readiness.pending_balance = %q, want 5", payload.ChannelReadiness.PendingBalance)
+	}
+}
+
 func TestStoreBootstrapWithYellowAsset(t *testing.T) {
 	t.Parallel()
 
 	walletAddress := "0x1111111111111111111111111111111111111111"
 	handler := newTestHandler(t, &testsupport.FakeClient{
-		GetBalancesFunc: func(context.Context, string) ([]core.BalanceEntry, error) {
-			return []core.BalanceEntry{
-				{Asset: "yusd", Balance: decimal.RequireFromString("7")},
-				{Asset: "yellow", Balance: decimal.RequireFromString("3")},
-			}, nil
+		GetLatestStateFunc: func(_ context.Context, wallet string, asset string, _ bool) (*core.State, error) {
+			balances := map[string]string{"yusd": "7", "yellow": "3"}
+			return fundedHTTPState(wallet, asset, balances[asset]), nil
 		},
 	})
 
@@ -163,7 +243,7 @@ func TestStoreContentSignedPostDisabled(t *testing.T) {
 	}
 }
 
-func TestStoreBootstrapReturnsServiceUnavailableWhenDisconnected(t *testing.T) {
+func TestStoreBootstrapReportsUnavailableWhenDisconnected(t *testing.T) {
 	t.Parallel()
 
 	cfg := testConfig(t)
@@ -192,8 +272,25 @@ func TestStoreBootstrapReturnsServiceUnavailableWhenDisconnected(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload struct {
+		AvailableBalance string `json:"available_balance"`
+		ChannelReadiness struct {
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"channel_readiness"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if payload.AvailableBalance != "0" {
+		t.Fatalf("available_balance = %q, want 0", payload.AvailableBalance)
+	}
+	if payload.ChannelReadiness.Status != "unavailable" {
+		t.Fatalf("channel_readiness.status = %q, want unavailable", payload.ChannelReadiness.Status)
 	}
 }
 
@@ -249,5 +346,9 @@ func testConfig(t *testing.T) *config.Config {
 		StoreName:          "Nitrolite App Session Store",
 		StoreAppID:         "store",
 		StoreAppPrivateKey: "",
+		StoreChannelBootstrapAmounts: map[string]string{
+			"yellow": "10",
+			"yusd":   "10",
+		},
 	}
 }

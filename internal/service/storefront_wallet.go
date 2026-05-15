@@ -11,24 +11,26 @@ import (
 	appsigning "github.com/layer-3/nitrolite-store-example/internal/signing"
 	"github.com/layer-3/nitrolite-store-example/internal/store"
 	"github.com/layer-3/nitrolite/pkg/app"
+	"github.com/layer-3/nitrolite/pkg/core"
 	"github.com/layer-3/nitrolite/pkg/rpc"
 	sdk "github.com/layer-3/nitrolite/sdk/go"
 	"github.com/shopspring/decimal"
 )
 
 type StoreBootstrapResponse struct {
-	StoreName        string              `json:"store_name"`
-	AppID            string              `json:"app_id"`
-	AppSigner        string              `json:"app_signer"`
-	WalletAddress    string              `json:"wallet_address"`
-	SelectedAsset    string              `json:"selected_asset"`
-	DefaultAsset     string              `json:"default_asset"`
-	SupportedAssets  []string            `json:"supported_assets"`
-	AvailableBalance string              `json:"available_balance"`
-	Catalog          []StoreCatalogItem  `json:"catalog"`
-	Session          StoreShopperSession `json:"session"`
-	Library          []StoreLibraryItem  `json:"library"`
-	PendingAction    *StorePendingAction `json:"pending_action,omitempty"`
+	StoreName        string                `json:"store_name"`
+	AppID            string                `json:"app_id"`
+	AppSigner        string                `json:"app_signer"`
+	WalletAddress    string                `json:"wallet_address"`
+	SelectedAsset    string                `json:"selected_asset"`
+	DefaultAsset     string                `json:"default_asset"`
+	SupportedAssets  []string              `json:"supported_assets"`
+	AvailableBalance string                `json:"available_balance"`
+	ChannelReadiness StoreChannelReadiness `json:"channel_readiness"`
+	Catalog          []StoreCatalogItem    `json:"catalog"`
+	Session          StoreShopperSession   `json:"session"`
+	Library          []StoreLibraryItem    `json:"library"`
+	PendingAction    *StorePendingAction   `json:"pending_action,omitempty"`
 }
 
 type StoreShopperSession struct {
@@ -84,6 +86,19 @@ type StorePendingAction struct {
 	UpdatedAt      string               `json:"updated_at"`
 }
 
+type StoreChannelReadiness struct {
+	Status                  string `json:"status"`
+	Message                 string `json:"message"`
+	HomeBlockchainID        uint64 `json:"home_blockchain_id"`
+	BootstrapAmount         string `json:"bootstrap_amount"`
+	AvailableBalance        string `json:"available_balance"`
+	PendingBalance          string `json:"pending_balance"`
+	RequiresChannelCreation bool   `json:"requires_channel_creation"`
+	PendingTransition       string `json:"pending_transition,omitempty"`
+	PendingAmount           string `json:"pending_amount,omitempty"`
+	OnChainBalance          string `json:"on_chain_balance"`
+}
+
 type StoreUpdateResponse struct {
 	Status        string                  `json:"status"`
 	Intent        string                  `json:"intent"`
@@ -98,21 +113,23 @@ type submitAppStateFunc func(ctx context.Context, wsURL string, req rpc.AppSessi
 type createAppSessionFunc func(ctx context.Context, wsURL string, req rpc.AppSessionsV1CreateAppSessionRequest) (*rpc.AppSessionsV1CreateAppSessionResponse, error)
 
 type WalletStoreService struct {
-	provider            clientProvider
-	store               *store.Store
-	appSigner           appsigning.Signer
-	storeName           string
-	appID               string
-	defaultAsset        string
-	supportedAssets     []string
-	catalog             []StoreCatalogItem
-	wsURL               string
-	now                 func() time.Time
-	submitAppStateRPC   submitAppStateFunc
-	createAppSessionRPC createAppSessionFunc
+	provider                clientProvider
+	store                   *store.Store
+	appSigner               appsigning.Signer
+	storeName               string
+	appID                   string
+	defaultAsset            string
+	supportedAssets         []string
+	catalog                 []StoreCatalogItem
+	wsURL                   string
+	homeBlockchains         map[string]uint64
+	channelBootstrapAmounts map[string]string
+	now                     func() time.Time
+	submitAppStateRPC       submitAppStateFunc
+	createAppSessionRPC     createAppSessionFunc
 }
 
-func NewWalletStoreService(provider clientProvider, appStore *store.Store, appSigner appsigning.Signer, storeName string, appID string, homeBlockchains map[string]uint64, wsURL string) *WalletStoreService {
+func NewWalletStoreService(provider clientProvider, appStore *store.Store, appSigner appsigning.Signer, storeName string, appID string, homeBlockchains map[string]uint64, wsURL string, channelBootstrapAmounts ...map[string]string) *WalletStoreService {
 	assets := supportedStoreAssets(homeBlockchains)
 	defaultAsset := "yusd"
 	if len(assets) > 0 {
@@ -124,20 +141,26 @@ func NewWalletStoreService(provider clientProvider, appStore *store.Store, appSi
 			}
 		}
 	}
+	amounts := defaultChannelBootstrapAmounts()
+	if len(channelBootstrapAmounts) > 0 {
+		amounts = normalizeChannelBootstrapAmounts(channelBootstrapAmounts[0])
+	}
 
 	return &WalletStoreService{
-		provider:            provider,
-		store:               appStore,
-		appSigner:           appSigner,
-		storeName:           strings.TrimSpace(storeName),
-		appID:               strings.TrimSpace(appID),
-		defaultAsset:        defaultAsset,
-		supportedAssets:     assets,
-		catalog:             seededCatalog(),
-		wsURL:               strings.TrimSpace(wsURL),
-		now:                 time.Now,
-		submitAppStateRPC:   submitAppStateRPC,
-		createAppSessionRPC: createAppSessionRPC,
+		provider:                provider,
+		store:                   appStore,
+		appSigner:               appSigner,
+		storeName:               strings.TrimSpace(storeName),
+		appID:                   strings.TrimSpace(appID),
+		defaultAsset:            defaultAsset,
+		supportedAssets:         assets,
+		catalog:                 seededCatalog(),
+		wsURL:                   strings.TrimSpace(wsURL),
+		homeBlockchains:         normalizeHomeBlockchains(homeBlockchains),
+		channelBootstrapAmounts: amounts,
+		now:                     time.Now,
+		submitAppStateRPC:       submitAppStateRPC,
+		createAppSessionRPC:     createAppSessionRPC,
 	}
 }
 
@@ -151,10 +174,8 @@ func (s *WalletStoreService) Bootstrap(ctx context.Context, walletAddress string
 	if err != nil {
 		return nil, err
 	}
-	availableBalance, err := s.availableBalance(ctx, walletAddress, asset)
-	if err != nil {
-		return nil, err
-	}
+	readiness := s.channelReadiness(ctx, walletAddress, asset)
+	availableBalance := readiness.AvailableBalance
 	session := StoreShopperSession{
 		Asset:          asset,
 		Status:         "missing",
@@ -209,6 +230,7 @@ func (s *WalletStoreService) Bootstrap(ctx context.Context, walletAddress string
 		DefaultAsset:     s.defaultAsset,
 		SupportedAssets:  append([]string(nil), s.supportedAssets...),
 		AvailableBalance: availableBalance,
+		ChannelReadiness: readiness,
 		Catalog:          catalog,
 		Session:          session,
 		Library:          library,
@@ -290,6 +312,9 @@ func (s *WalletStoreService) CreateSession(ctx context.Context, req StoreInitReq
 		return nil, err
 	}
 	if err := verifyCreateSessionSignature(walletAddress, definition, req.SessionData, req.UserSignature); err != nil {
+		return nil, err
+	}
+	if err := s.requireFundedHomeChannel(ctx, walletAddress, asset); err != nil {
 		return nil, err
 	}
 
@@ -556,20 +581,112 @@ func (s *WalletStoreService) normalizeAsset(raw string) (string, error) {
 }
 
 func (s *WalletStoreService) availableBalance(ctx context.Context, walletAddress string, asset string) (string, error) {
+	return s.channelReadiness(ctx, walletAddress, asset).AvailableBalance, nil
+}
+
+func (s *WalletStoreService) requireFundedHomeChannel(ctx context.Context, walletAddress string, asset string) error {
+	readiness := s.channelReadiness(ctx, walletAddress, asset)
+	if readiness.Status != "ready" {
+		return conflictCodef("channel_"+readiness.Status, "%s", readiness.Message)
+	}
+	return nil
+}
+
+func (s *WalletStoreService) channelReadiness(ctx context.Context, walletAddress string, asset string) StoreChannelReadiness {
+	chainID := s.homeBlockchains[asset]
+	bootstrapAmount := s.channelBootstrapAmount(asset)
+	readiness := StoreChannelReadiness{
+		Status:           "unavailable",
+		Message:          "channel readiness is unavailable",
+		HomeBlockchainID: chainID,
+		BootstrapAmount:  bootstrapAmount,
+		AvailableBalance: "0",
+		PendingBalance:   "0",
+		OnChainBalance:   "0",
+	}
+
 	client, _, err := activeClient(s.provider)
 	if err != nil {
-		return "", err
+		readiness.Message = "nitronode is not reachable"
+		return readiness
 	}
-	balances, err := client.GetBalances(ctx, walletAddress)
-	if err != nil {
-		return "", upstreamf(err, "failed to get balances")
-	}
-	for _, entry := range balances {
-		if strings.EqualFold(entry.Asset, asset) {
-			return entry.Balance.String(), nil
+
+	signedState, signedErr := client.GetLatestState(ctx, walletAddress, asset, true)
+	signedReady := false
+	if signedErr == nil && signedState != nil {
+		readiness.PendingBalance = signedState.HomeLedger.UserBalance.String()
+		if signedState.HomeChannelID != nil && signedState.HomeLedger.UserBalance.IsPositive() {
+			readiness.AvailableBalance = signedState.HomeLedger.UserBalance.String()
+			signedReady = true
+		} else if signedState.HomeLedger.UserBalance.IsPositive() {
+			readiness.RequiresChannelCreation = true
 		}
 	}
-	return "0", nil
+
+	latestState, latestErr := client.GetLatestState(ctx, walletAddress, asset, false)
+	if latestErr == nil && latestState != nil {
+		readiness.PendingBalance = latestState.HomeLedger.UserBalance.String()
+		latestHasFunds := latestState.HomeLedger.UserBalance.IsPositive()
+		latestHasOpenChannel := latestState.HomeChannelID != nil
+		latestMatchesSigned := signedState != nil && latestState.ID == signedState.ID && latestState.Version == signedState.Version
+		if latestHasFunds && latestHasOpenChannel && (latestState.UserSig != nil || latestMatchesSigned) {
+			readiness.Status = "ready"
+			readiness.Message = "home channel is ready"
+			readiness.AvailableBalance = latestState.HomeLedger.UserBalance.String()
+			return readiness
+		}
+		if latestHasFunds {
+			if !latestHasOpenChannel {
+				readiness.RequiresChannelCreation = true
+			}
+			if latestState.Transition.Type != core.TransitionTypeVoid || !latestState.Transition.Amount.IsZero() {
+				readiness.PendingTransition = latestState.Transition.Type.String()
+				readiness.PendingAmount = latestState.Transition.Amount.String()
+			}
+			readiness.Status = "ack_required"
+			if readiness.RequiresChannelCreation {
+				readiness.Message = "acknowledge received off-chain funds to open a home channel"
+			} else {
+				readiness.Message = "acknowledge pending channel funds before starting the store session"
+			}
+			return readiness
+		}
+	}
+
+	if readiness.RequiresChannelCreation {
+		readiness.Status = "ack_required"
+		readiness.Message = "complete channel setup for received off-chain funds"
+		return readiness
+	}
+
+	if signedReady {
+		readiness.Status = "ready"
+		readiness.Message = "home channel is ready"
+		return readiness
+	}
+
+	if chainID == 0 {
+		readiness.Status = "unavailable"
+		readiness.Message = "home blockchain is not configured for this asset"
+		return readiness
+	}
+
+	onChainBalance, err := client.GetOnChainBalance(ctx, chainID, asset, walletAddress)
+	if err != nil {
+		readiness.Status = "unavailable"
+		readiness.Message = "on-chain balance lookup failed"
+		return readiness
+	}
+	readiness.OnChainBalance = onChainBalance.String()
+	if onChainBalance.IsPositive() {
+		readiness.Status = "deposit_required"
+		readiness.Message = "prepare a funded home channel before starting the store session"
+		return readiness
+	}
+
+	readiness.Status = "funds_required"
+	readiness.Message = "add test funds before preparing a home channel"
+	return readiness
 }
 
 func (s *WalletStoreService) lookupSession(ctx context.Context, sessionID string) (*app.AppSessionInfoV1, error) {
@@ -1035,6 +1152,9 @@ func (s *WalletStoreService) ensureApp(ctx context.Context) error {
 	opts := &sdk.GetAppsOptions{AppID: &s.appID}
 	apps, _, err := client.GetApps(ctx, opts)
 	if err != nil {
+		if isAppRegistryDisabledError(err) {
+			return nil
+		}
 		return upstreamf(err, "failed to get apps")
 	}
 	for _, info := range apps {
@@ -1046,6 +1166,10 @@ func (s *WalletStoreService) ensureApp(ctx context.Context) error {
 		return upstreamf(err, "failed to register store app")
 	}
 	return nil
+}
+
+func isAppRegistryDisabledError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "apps.v1 group is disabled")
 }
 
 func (s *WalletStoreService) catalogItem(id string) *StoreCatalogItem {

@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
+import { type ReactNode, useEffect, useMemo, useState } from 'react'
 import Decimal from 'decimal.js'
 import { AnimatePresence, motion, type HTMLMotionProps } from 'motion/react'
 import { Activity, AlertTriangle, BookOpen, CheckCircle2, Copy, CreditCard, Library, Loader2, RefreshCw, ShieldCheck, ShoppingBag, Wallet } from 'lucide-react'
@@ -25,7 +25,8 @@ const DEFAULT_ASSET = 'yusd'
 const DEMO_ASSETS = ['yusd', 'yellow']
 const STORED_ASSET_KEY = 'nitrolite-store:selected-asset'
 const DEPOSIT_SUBMIT_TIMEOUT_MS = 45_000
-const DEFAULT_WS_URL = import.meta.env.VITE_CLEARNODE_WS_URL || 'wss://clearnode-sandbox.yellow.org/v1/ws'
+const MAX_APPROVE_AMOUNT = new Decimal('1e18')
+const DEFAULT_WS_URL = import.meta.env.VITE_CLEARNODE_WS_URL || 'wss://nitronode-stress.yellow.org/v1/ws'
 const DEFAULT_BLOCKCHAIN_RPCS: Record<number, string> = {
   11155111: import.meta.env.VITE_BLOCKCHAIN_RPC_11155111 || 'https://ethereum-sepolia-rpc.publicnode.com',
 }
@@ -119,6 +120,21 @@ type StorePendingAction = {
   updated_at: string
 }
 
+type ChannelReadinessStatus = 'ready' | 'ack_required' | 'deposit_required' | 'funds_required' | 'unavailable'
+
+type StoreChannelReadiness = {
+  status: ChannelReadinessStatus
+  message: string
+  home_blockchain_id: number
+  bootstrap_amount: string
+  available_balance: string
+  pending_balance: string
+  requires_channel_creation: boolean
+  pending_transition?: string
+  pending_amount?: string
+  on_chain_balance: string
+}
+
 type StoreLibraryItem = {
   id: string
   title: string
@@ -137,6 +153,7 @@ type StoreBootstrap = {
   default_asset: string
   supported_assets: string[]
   available_balance: string
+  channel_readiness: StoreChannelReadiness
   catalog: StoreCatalogItem[]
   session: StoreSession
   library: StoreLibraryItem[]
@@ -248,7 +265,17 @@ function parseDecimal(value: string): Decimal | null {
 }
 
 function isPositiveAmount(value: string): boolean {
-  return parseDecimal(value)?.isPositive() ?? false
+  return parseDecimal(value)?.greaterThan(0) ?? false
+}
+
+function minDecimal(a: Decimal, b: Decimal): Decimal {
+  return a.lessThan(b) ? a : b
+}
+
+function isAllowanceError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  const normalized = message.toLowerCase()
+  return normalized.includes('allowance') && normalized.includes('sufficient')
 }
 
 function parseSessionDataLabel(sessionData?: string): string {
@@ -269,6 +296,58 @@ function parseSessionDataLabel(sessionData?: string): string {
     }
   } catch {
     return 'Store session active.'
+  }
+}
+
+function channelReadinessLabel(status?: ChannelReadinessStatus) {
+  switch (status) {
+    case 'ready':
+      return 'ready'
+    case 'ack_required':
+      return 'ack required'
+    case 'deposit_required':
+      return 'deposit required'
+    case 'funds_required':
+      return 'funds needed'
+    case 'unavailable':
+      return 'sync unavailable'
+    default:
+      return 'offline'
+  }
+}
+
+function channelReadinessMessage(readiness: StoreChannelReadiness | undefined, asset: string) {
+  switch (readiness?.status) {
+    case 'ready':
+      return `Home channel is ready with ${formatAmount(readiness.available_balance)} ${asset.toUpperCase()}.`
+    case 'ack_required':
+      if (readiness.requires_channel_creation) {
+        return `${formatAmount(readiness.pending_balance)} ${asset.toUpperCase()} was received off-chain. Sign once to open a home channel and make it available.`
+      }
+      return `Acknowledge ${formatAmount(readiness.pending_balance)} ${asset.toUpperCase()} in your pending channel state.`
+    case 'deposit_required':
+      return `Prepare a home channel with up to ${formatAmount(readiness.bootstrap_amount)} ${asset.toUpperCase()} from your wallet.`
+    case 'funds_required':
+      return `Add ${asset.toUpperCase()} test funds to this wallet before preparing a home channel.`
+    case 'unavailable':
+      return readiness.message || 'Channel readiness could not be checked.'
+    default:
+      return 'Connect wallet to check channel readiness.'
+  }
+}
+
+function sessionStatusLabel(status?: string) {
+  switch (status) {
+    case 'open':
+      return 'ready'
+    case 'missing':
+      return 'setup required'
+    case 'sync_failed':
+      return 'sync pending'
+    case 'closed':
+      return 'closed'
+    default:
+      return status ?? 'offline'
   }
 }
 
@@ -405,7 +484,6 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [activity, setActivity] = useState<string[]>([])
-  const autoCreatingRef = useRef(false)
 
   const libraryIds = useMemo(() => new Set((bootstrap?.library ?? []).map((item) => item.id)), [bootstrap])
   const assetOptions = useMemo(() => {
@@ -413,15 +491,38 @@ export default function App() {
     return DEMO_ASSETS.filter((asset) => supported.has(asset))
   }, [bootstrap])
   const sessionReady = Boolean(bootstrap?.session.app_session_id && bootstrap.session.status === 'open')
+  const sessionNeedsStart = bootstrap?.session.status === 'missing' || bootstrap?.session.status === 'sync_failed'
   const pendingDeposit = bootstrap?.pending_action?.type === 'user_deposit' ? bootstrap.pending_action : null
+  const channelReadiness = bootstrap?.channel_readiness
+  const channelReady = channelReadiness?.status === 'ready'
+  const canRunChannelSetup = channelReadiness?.status === 'ack_required' || channelReadiness?.status === 'deposit_required'
   const availableBalance = useMemo(() => parseDecimal(bootstrap?.available_balance ?? '0') ?? new Decimal(0), [bootstrap?.available_balance])
+  const pendingChannelBalance = useMemo(
+    () => parseDecimal(channelReadiness?.pending_balance ?? bootstrap?.available_balance ?? '0') ?? new Decimal(0),
+    [bootstrap?.available_balance, channelReadiness?.pending_balance],
+  )
+  const pendingChannelDelta = useMemo(() => {
+    const delta = pendingChannelBalance.minus(availableBalance)
+    return delta.greaterThan(0) ? delta : new Decimal(0)
+  }, [availableBalance, pendingChannelBalance])
+  const pendingChannelAmount = useMemo(
+    () => parseDecimal(channelReadiness?.pending_amount ?? pendingChannelDelta.toFixed()) ?? pendingChannelDelta,
+    [channelReadiness?.pending_amount, pendingChannelDelta],
+  )
+  const hasPendingChannelBalance = Boolean(channelReadiness?.status === 'ack_required' && pendingChannelBalance.greaterThan(availableBalance))
+  const requiresChannelCreation = Boolean(channelReadiness?.requires_channel_creation)
+  const hasWithdrawnChannelBalance = Boolean(
+    channelReadiness?.status === 'ack_required' && channelReadiness.pending_transition === 'release' && pendingChannelAmount.greaterThan(0),
+  )
   const depositValue = useMemo(() => parseDecimal(depositAmount), [depositAmount])
   const pendingDepositValue = useMemo(() => (pendingDeposit ? parseDecimal(pendingDeposit.amount) : null), [pendingDeposit])
-  const depositExceedsAvailable = Boolean(bootstrap && depositValue?.isPositive() && depositValue.greaterThan(availableBalance))
-  const pendingDepositExceedsAvailable = Boolean(bootstrap && pendingDepositValue?.isPositive() && pendingDepositValue.greaterThan(availableBalance))
-  const canDeposit = Boolean(walletAddress && sessionReady && busy === null && isPositiveAmount(depositAmount) && !depositExceedsAvailable)
-  const canWithdraw = Boolean(walletAddress && sessionReady && busy === null && isPositiveAmount(withdrawAmount))
+  const depositExceedsAvailable = Boolean(bootstrap && depositValue?.greaterThan(0) && depositValue.greaterThan(availableBalance))
+  const pendingDepositExceedsAvailable = Boolean(bootstrap && pendingDepositValue?.greaterThan(0) && pendingDepositValue.greaterThan(availableBalance))
+  const canPrepareChannel = Boolean(walletAddress && nitroliteClient && bootstrap && busy === null && canRunChannelSetup)
+  const canDeposit = Boolean(walletAddress && sessionReady && channelReady && busy === null && isPositiveAmount(depositAmount) && !depositExceedsAvailable)
+  const canWithdraw = Boolean(walletAddress && sessionReady && channelReady && busy === null && isPositiveAmount(withdrawAmount))
   const canResumeDeposit = Boolean(walletAddress && nitroliteClient && pendingDeposit && busy === null && !pendingDepositExceedsAvailable)
+  const canCreateSession = Boolean(sessionNeedsStart && walletAddress && walletClient && busy === null && channelReady)
 
   function appendLog(line: string) {
     const stamped = `${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} ${line}`
@@ -449,7 +550,7 @@ export default function App() {
     setWalletClient(client)
     setNitroliteClient(nitrolite)
     appendLog(`${label} ${shortAddress(wallet)}`)
-    await refreshBootstrap(asset, nitrolite, wallet, client)
+    await refreshBootstrap(asset, wallet)
   }
 
   useEffect(() => {
@@ -513,10 +614,8 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  async function refreshBootstrap(asset: string, clientOverride?: Client | null, walletOverride?: string | null, walletClientOverride?: WalletClient | null) {
-    const client = clientOverride ?? nitroliteClient
+  async function refreshBootstrap(asset: string, walletOverride?: string | null) {
     const wallet = walletOverride ?? walletAddress
-    const clientSigner = walletClientOverride ?? walletClient
     if (!wallet) {
       throw new Error('Connect a wallet before bootstrapping the store.')
     }
@@ -526,18 +625,7 @@ export default function App() {
     setBootstrap(next)
     setSelectedAsset(next.selected_asset)
     persistAsset(next.selected_asset)
-    appendLog(`bootstrap ${asset.toUpperCase()} -> ${next.session.status}`)
-
-    if (next.session.status === 'missing' && client && wallet && clientSigner && !autoCreatingRef.current) {
-      autoCreatingRef.current = true
-      try {
-        const created = await createSession(next, clientSigner, wallet)
-        setBootstrap(created)
-        appendLog(`session created ${shortAddress(created.session.app_session_id ?? '')}`)
-      } finally {
-        autoCreatingRef.current = false
-      }
-    }
+    appendLog(`bootstrap ${asset.toUpperCase()} -> ${sessionStatusLabel(next.session.status)}`)
   }
 
   async function connectWallet() {
@@ -591,6 +679,92 @@ export default function App() {
         user_signature: userSignature,
       }),
     })
+  }
+
+  async function startSession() {
+    if (!bootstrap || !walletClient || !walletAddress) return
+    if (!sessionNeedsStart) return
+
+    setBusy('create-session')
+    setError(null)
+    try {
+      const created = await createSession(bootstrap, walletClient, walletAddress)
+      setBootstrap(created)
+      appendLog(`session created ${shortAddress(created.session.app_session_id ?? '')}`)
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : 'Failed to create store session')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function checkpointWithApproval(asset: string): Promise<string | null> {
+    if (!nitroliteClient || !walletAddress || !bootstrap) throw new Error('Connect a wallet before preparing a channel.')
+    try {
+      return await nitroliteClient.checkpoint(asset)
+    } catch (checkpointError) {
+      if (!isAllowanceError(checkpointError)) {
+        const message = checkpointError instanceof Error ? checkpointError.message : String(checkpointError)
+        if (message.toLowerCase().includes('does not require a blockchain operation')) return null
+        throw checkpointError
+      }
+      const signedState = await nitroliteClient.getLatestState(walletAddress as Address, asset, true)
+      const chainID = signedState.homeLedger.blockchainId || BigInt(bootstrap.channel_readiness.home_blockchain_id)
+      appendLog(`approve ${asset.toUpperCase()} channel spend`)
+      await nitroliteClient.approveToken(chainID, asset, MAX_APPROVE_AMOUNT)
+      return await nitroliteClient.checkpoint(asset)
+    }
+  }
+
+  async function prepareChannel() {
+    if (!bootstrap || !walletAddress || !nitroliteClient) return
+    const readiness = bootstrap.channel_readiness
+    const asset = bootstrap.selected_asset
+    if (readiness.status !== 'ack_required' && readiness.status !== 'deposit_required') return
+
+    setBusy('prepare-channel')
+    setError(null)
+    try {
+      if (readiness.status === 'ack_required') {
+        appendLog(`acknowledge ${asset.toUpperCase()} channel state`)
+        try {
+          await nitroliteClient.acknowledge(asset)
+        } catch (ackError) {
+          const message = ackError instanceof Error ? ackError.message : String(ackError)
+          if (!message.toLowerCase().includes('already acknowledged')) throw ackError
+        }
+      } else {
+        const chainID = BigInt(readiness.home_blockchain_id)
+        const configuredAmount = parseDecimal(readiness.bootstrap_amount) ?? new Decimal(10)
+        const onChainBalance = await nitroliteClient.getOnChainBalance(chainID, asset, walletAddress as Address)
+        const amount = minDecimal(configuredAmount, onChainBalance)
+        if (!amount.greaterThan(0)) {
+          throw new Error(`Add ${asset.toUpperCase()} test funds to this wallet before preparing a home channel.`)
+        }
+        appendLog(`prepare ${asset.toUpperCase()} channel ${amount.toFixed()}`)
+        try {
+          await nitroliteClient.deposit(chainID, asset, amount)
+        } catch (depositError) {
+          if (!isAllowanceError(depositError)) throw depositError
+          appendLog(`approve ${asset.toUpperCase()} channel spend`)
+          await nitroliteClient.approveToken(chainID, asset, MAX_APPROVE_AMOUNT)
+          await nitroliteClient.deposit(chainID, asset, amount)
+        }
+      }
+
+      const txHash = await checkpointWithApproval(asset)
+      appendLog(txHash ? `channel checkpoint ${shortAddress(txHash)}` : `channel state synced`)
+      await refreshBootstrap(asset)
+    } catch (setupError) {
+      setError(setupError instanceof Error ? setupError.message : 'Failed to prepare channel')
+      try {
+        await refreshBootstrap(asset)
+      } catch {
+        // Keep the setup error visible.
+      }
+    } finally {
+      setBusy(null)
+    }
   }
 
   async function submitPurchase(item: StoreCatalogItem) {
@@ -661,7 +835,7 @@ export default function App() {
     setError(null)
     try {
       const amount = new Decimal(withdrawAmount)
-      if (!amount.isPositive()) {
+      if (!amount.greaterThan(0)) {
         throw new Error('Withdraw amount must be greater than zero.')
       }
       const version = bootstrap.session.version + 1
@@ -699,7 +873,17 @@ export default function App() {
       setBootstrap(result.bootstrap)
       appendLog(`withdraw ${amount.toFixed()}`)
     } catch (withdrawError) {
-      setError(withdrawError instanceof Error ? withdrawError.message : 'Failed to withdraw')
+      const message = withdrawError instanceof Error ? withdrawError.message : 'Failed to withdraw'
+      setError(
+        message === 'failed to submit app state'
+          ? 'Nitronode rejected the withdraw state. Refreshed the session; try again.'
+          : message,
+      )
+      try {
+        await refreshBootstrap(bootstrap.selected_asset)
+      } catch {
+        // Keep the withdraw error visible.
+      }
     } finally {
       setBusy(null)
     }
@@ -708,23 +892,27 @@ export default function App() {
   async function finishDeposit(appStateUpdate: AppStateUpdateV1, userSignature: Hex, appSignature: Hex, asset: string, amount: Decimal) {
     if (!nitroliteClient) throw new Error('Connect a wallet before submitting the deposit.')
     appendLog(`deposit signed ${amount.toFixed()} ${asset.toUpperCase()}; submitting`)
-    await ensureHomeChannelReady(asset)
+    await assertHomeChannelCanDeposit(asset, amount)
     await withTimeout(
       nitroliteClient.submitAppSessionDeposit(appStateUpdate, [userSignature, appSignature], asset, amount),
       DEPOSIT_SUBMIT_TIMEOUT_MS,
-      'Deposit is signed, but the Clearnode submit did not finish yet. Use Resume deposit after refresh.',
+      'Deposit is signed, but the Nitronode submit did not finish yet. Use Resume deposit after refresh.',
     )
     await refreshBootstrap(asset)
     appendLog(`deposit ${amount.toFixed()} ${asset.toUpperCase()} submitted`)
   }
 
-  async function ensureHomeChannelReady(asset: string) {
+  async function assertHomeChannelCanDeposit(asset: string, amount: Decimal) {
     if (!nitroliteClient || !walletAddress) throw new Error('Connect a wallet before submitting the deposit.')
+    let state
     try {
-      await nitroliteClient.getLatestState(walletAddress as Address, asset, false)
+      state = await nitroliteClient.getLatestState(walletAddress as Address, asset, true)
     } catch {
-      appendLog(`opening ${asset.toUpperCase()} channel`)
-      await nitroliteClient.acknowledge(asset)
+      throw new Error(`Open and fund a ${asset.toUpperCase()} home channel before using this store.`)
+    }
+    const channelBalance = new Decimal(state.homeLedger.userBalance)
+    if (channelBalance.lessThan(amount)) {
+      throw new Error(`Deposit amount exceeds your available ${asset.toUpperCase()} channel funds.`)
     }
   }
 
@@ -760,12 +948,15 @@ export default function App() {
     setError(null)
     try {
       const amount = new Decimal(depositAmount)
-      if (!amount.isPositive()) {
+      if (!amount.greaterThan(0)) {
         throw new Error('Deposit amount must be greater than zero.')
       }
       const available = new Decimal(bootstrap.available_balance || '0')
       if (amount.greaterThan(available)) {
-        throw new Error(`Deposit amount exceeds your available ${bootstrap.selected_asset.toUpperCase()} balance.`)
+        if (!available.greaterThan(0)) {
+          throw new Error(`Open and fund a ${bootstrap.selected_asset.toUpperCase()} home channel before depositing.`)
+        }
+        throw new Error(`Deposit amount exceeds your available ${bootstrap.selected_asset.toUpperCase()} channel funds.`)
       }
       const version = bootstrap.session.version + 1
       const currentUser = new Decimal(bootstrap.session.user_allocation)
@@ -860,6 +1051,72 @@ export default function App() {
     }
   }
 
+  function channelSetupActionLabel() {
+    if (busy === 'prepare-channel') return 'Preparing'
+    switch (channelReadiness?.status) {
+      case 'ack_required':
+        return 'Make available'
+      case 'deposit_required':
+        return 'Prepare channel'
+      case 'funds_required':
+        return 'Funds needed'
+      case 'unavailable':
+        return 'Reconnect'
+      default:
+        return 'Prepare channel'
+    }
+  }
+
+  function renderChannelSetupPanel() {
+    if (!bootstrap || channelReady) return null
+    const title = hasWithdrawnChannelBalance
+      ? 'Make withdrawn balance available'
+      : requiresChannelCreation
+        ? 'Make received funds available'
+      : channelReadiness?.status === 'ack_required'
+        ? 'Make pending balance available'
+        : channelReadinessLabel(channelReadiness?.status)
+    const message = hasWithdrawnChannelBalance
+      ? `${formatAmount(pendingChannelAmount.toFixed())} ${selectedAsset.toUpperCase()} from your store withdrawal is pending. Sign once to add it back to your available channel balance.`
+      : requiresChannelCreation
+        ? `${formatAmount(pendingChannelBalance.toFixed())} ${selectedAsset.toUpperCase()} was received off-chain. Sign once, then checkpoint to open your home channel and make it available.`
+      : channelReadiness?.status === 'ack_required'
+        ? `${formatAmount(pendingChannelBalance.toFixed())} ${selectedAsset.toUpperCase()} is pending in your channel. Sign once to make it available.`
+        : channelReadinessMessage(channelReadiness, selectedAsset)
+
+    return (
+      <div className="mt-4 flex flex-col gap-3 rounded-lg border border-black/10 bg-white/90 p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <p className="flex items-center gap-2 text-sm font-black uppercase tracking-normal text-ink">
+            <ShieldCheck className="size-4 shrink-0" />
+            {title}
+          </p>
+          <p className="mt-1 text-sm font-semibold leading-5 text-black/60">
+            {message}
+          </p>
+          {hasPendingChannelBalance ? (
+            <div className="mt-3 grid gap-2 text-xs font-black text-black/60 sm:grid-cols-2">
+              <span className="rounded-md border border-black/10 bg-white px-3 py-2">
+                Available now: {formatAmount(availableBalance.toFixed())} {selectedAsset.toUpperCase()}
+              </span>
+              <span className="rounded-md border border-yellow-line bg-yellow-brand/20 px-3 py-2 text-ink">
+                After signing: {formatAmount(pendingChannelBalance.toFixed())} {selectedAsset.toUpperCase()}
+              </span>
+            </div>
+          ) : null}
+        </div>
+        <ActionButton
+          className="shrink-0"
+          disabled={!canPrepareChannel}
+          onClick={prepareChannel}
+          icon={busy === 'prepare-channel' ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+        >
+          {channelSetupActionLabel()}
+        </ActionButton>
+      </div>
+    )
+  }
+
   return (
     <main className="mx-auto flex w-full min-w-0 max-w-[1180px] flex-col gap-5 overflow-x-hidden px-4 py-5 sm:px-6 lg:px-8">
       <motion.header
@@ -881,7 +1138,7 @@ export default function App() {
             </span>
             <span className="status-pill">
               <CheckCircle2 className="size-3.5 text-emerald-700" />
-              {bootstrap?.session.status ?? 'offline'}
+              {sessionStatusLabel(bootstrap?.session.status)}
             </span>
           </div>
         </div>
@@ -942,6 +1199,11 @@ export default function App() {
               <p className="label-text">Available</p>
               <NumberTicker value={bootstrap?.available_balance ?? '0'} />
               <p className="mt-1 text-xs font-bold uppercase text-black/50">{selectedAsset}</p>
+              {hasPendingChannelBalance ? (
+                <p className="mt-1 text-xs font-bold text-amber-700">
+                  Pending: {formatAmount(pendingChannelBalance.toFixed())} {selectedAsset.toUpperCase()}
+                </p>
+              ) : null}
             </div>
             <div className="metric-card">
               <p className="label-text">Store balance</p>
@@ -959,6 +1221,26 @@ export default function App() {
             {bootstrap ? parseSessionDataLabel(bootstrap.session.session_data) : 'Connect wallet to load the store.'}
           </p>
 
+          {sessionNeedsStart && channelReady ? (
+            <div className="mt-4 flex flex-col gap-3 rounded-lg border border-black/10 bg-white/90 p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-sm font-semibold leading-5 text-black/60">
+                {bootstrap?.session.status === 'sync_failed'
+                  ? 'The previous store session is not synced. Sign once to start a fresh store session.'
+                  : 'Sign once to start a store session and unlock deposits.'}
+              </p>
+              <ActionButton
+                className="shrink-0"
+                disabled={!canCreateSession}
+                onClick={startSession}
+                icon={busy === 'create-session' ? <Loader2 className="size-4 animate-spin" /> : <CreditCard className="size-4" />}
+              >
+                {busy === 'create-session' ? 'Starting' : 'Sign to start'}
+              </ActionButton>
+            </div>
+          ) : null}
+
+          {sessionNeedsStart ? renderChannelSetupPanel() : null}
+
           {pendingDeposit ? (
             <div className="mt-4 flex flex-col gap-3 rounded-lg border border-yellow-line bg-yellow-brand/25 p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
               <div className="min-w-0">
@@ -969,7 +1251,7 @@ export default function App() {
                 <p className="mt-1 text-sm font-semibold leading-5 text-black/60">
                   {pendingDepositExceedsAvailable
                     ? `${formatAmount(pendingDeposit.amount)} ${pendingDeposit.asset.toUpperCase()} exceeds the current available balance. Enter a smaller deposit to replace it, or top up before resuming.`
-                    : `${formatAmount(pendingDeposit.amount)} ${pendingDeposit.asset.toUpperCase()} is signed at version ${pendingDeposit.version}. Resume submits it to Clearnode without another MetaMask prompt.`}
+                    : `${formatAmount(pendingDeposit.amount)} ${pendingDeposit.asset.toUpperCase()} is signed at version ${pendingDeposit.version}. Resume submits it to Nitronode without another MetaMask prompt.`}
                 </p>
               </div>
               <ActionButton
@@ -984,65 +1266,69 @@ export default function App() {
             </div>
           ) : null}
 
-          <div className="mt-5 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
-            <label className="grid gap-2 text-sm font-black text-ink">
-              Deposit
-              <input
-                id="deposit-amount"
-                name="deposit_amount"
-                className="min-h-11 rounded-md border border-black/10 bg-white px-3 text-base font-bold text-ink shadow-sm"
-                value={depositAmount}
-                onChange={(event) => setDepositAmount(event.target.value)}
-                type="number"
-                inputMode="decimal"
-                min="0.000001"
-                step="0.01"
-                required
-                aria-label={`Deposit amount in ${selectedAsset.toUpperCase()}`}
-              />
-              {depositExceedsAvailable ? (
-                <span className="text-xs font-bold leading-5 text-red-700">
-                  Available balance is {formatAmount(bootstrap?.available_balance ?? '0')} {selectedAsset.toUpperCase()}.
-                </span>
-              ) : pendingDeposit ? (
-                <span className="text-xs font-bold leading-5 text-black/50">A new deposit replaces the pending checkpoint.</span>
-              ) : null}
-            </label>
-            <ActionButton
-              className="self-end"
-              disabled={!canDeposit}
-              onClick={submitDeposit}
-              icon={busy === 'deposit' ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
-            >
-              {busy === 'deposit' ? 'Depositing' : 'Deposit'}
-            </ActionButton>
+          {sessionReady && !channelReady ? renderChannelSetupPanel() : null}
 
-            <label className="grid gap-2 text-sm font-black text-ink">
-              Withdraw
-              <input
-                id="withdraw-amount"
-                name="withdraw_amount"
-                className="min-h-11 rounded-md border border-black/10 bg-white px-3 text-base font-bold text-ink shadow-sm"
-                value={withdrawAmount}
-                onChange={(event) => setWithdrawAmount(event.target.value)}
-                type="number"
-                inputMode="decimal"
-                min="0.000001"
-                step="0.01"
-                required
-                aria-label={`Withdraw amount in ${selectedAsset.toUpperCase()}`}
-              />
-            </label>
-            <ActionButton
-              className="self-end"
-              variant="secondary"
-              disabled={!canWithdraw}
-              onClick={submitWithdraw}
-              icon={busy === 'withdraw' ? <Loader2 className="size-4 animate-spin" /> : <CreditCard className="size-4" />}
-            >
-              {busy === 'withdraw' ? 'Withdrawing' : 'Withdraw'}
-            </ActionButton>
-          </div>
+          {sessionReady && channelReady ? (
+            <div className="mt-5 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+              <label className="grid gap-2 text-sm font-black text-ink">
+                Deposit
+                <input
+                  id="deposit-amount"
+                  name="deposit_amount"
+                  className="min-h-11 rounded-md border border-black/10 bg-white px-3 text-base font-bold text-ink shadow-sm"
+                  value={depositAmount}
+                  onChange={(event) => setDepositAmount(event.target.value)}
+                  type="number"
+                  inputMode="decimal"
+                  min="0.000001"
+                  step="0.01"
+                  required
+                  aria-label={`Deposit amount in ${selectedAsset.toUpperCase()}`}
+                />
+                {depositExceedsAvailable ? (
+                  <span className="text-xs font-bold leading-5 text-red-700">
+                    {`Deposit amount exceeds your available ${selectedAsset.toUpperCase()} channel funds.`}
+                  </span>
+                ) : pendingDeposit ? (
+                  <span className="text-xs font-bold leading-5 text-black/50">A new deposit replaces the pending checkpoint.</span>
+                ) : null}
+              </label>
+              <ActionButton
+                className="self-end"
+                disabled={!canDeposit}
+                onClick={submitDeposit}
+                icon={busy === 'deposit' ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+              >
+                {busy === 'deposit' ? 'Depositing' : 'Deposit'}
+              </ActionButton>
+
+              <label className="grid gap-2 text-sm font-black text-ink">
+                Withdraw
+                <input
+                  id="withdraw-amount"
+                  name="withdraw_amount"
+                  className="min-h-11 rounded-md border border-black/10 bg-white px-3 text-base font-bold text-ink shadow-sm"
+                  value={withdrawAmount}
+                  onChange={(event) => setWithdrawAmount(event.target.value)}
+                  type="number"
+                  inputMode="decimal"
+                  min="0.000001"
+                  step="0.01"
+                  required
+                  aria-label={`Withdraw amount in ${selectedAsset.toUpperCase()}`}
+                />
+              </label>
+              <ActionButton
+                className="self-end"
+                variant="secondary"
+                disabled={!canWithdraw}
+                onClick={submitWithdraw}
+                icon={busy === 'withdraw' ? <Loader2 className="size-4 animate-spin" /> : <CreditCard className="size-4" />}
+              >
+                {busy === 'withdraw' ? 'Withdrawing' : 'Withdraw'}
+              </ActionButton>
+            </div>
+          ) : null}
         </MagicPanel>
 
         <MagicPanel>

@@ -5,11 +5,12 @@ Go backend and React frontend for a Nitrolite-backed content store using the Nit
 The shopper flow is intentionally narrow:
 
 1. Connect MetaMask.
-2. Create a two-party app session between the shopper wallet and store app signer.
-3. Deposit YUSD into the store session.
-4. Purchase content.
-5. Read purchased content.
-6. Withdraw remaining store balance.
+2. Prepare the selected asset home channel when the wallet is not ready yet.
+3. Create a two-party app session between the shopper wallet and store app signer.
+4. Deposit YUSD into the store session.
+5. Purchase content.
+6. Read purchased content.
+7. Withdraw remaining store balance.
 
 `YUSD` is the default walkthrough asset. `YELLOW` is also exposed as a second testnet asset so the same wallet/session flows can be exercised against another configured asset before mainnet asset names are finalized.
 
@@ -17,7 +18,7 @@ The shopper flow is intentionally narrow:
 
 - `/`: store UI
 - `/healthz`: process health
-- `/readyz`: Clearnode readiness
+- `/readyz`: Nitronode readiness
 - `GET /api/store/bootstrap`
 - `POST /api/store/init`
 - `POST /api/store/update`
@@ -31,7 +32,7 @@ The shopper flow is intentionally narrow:
 - The backend verifies the exact signed payload before adding the store app signature.
 - The backend never signs as the shopper.
 - Store authorization is based on app-session signatures, not login cookies.
-- Deposit checkpoints store the signed deposit payload long enough to resume a browser-side Clearnode submit after reload or timeout.
+- Deposit checkpoints store the signed deposit payload long enough to resume a browser-side Nitronode submit after reload or timeout.
 - This is not a production-ready authorization model: content reads use a public example-app gate keyed by wallet, item, and submitted purchase status, so production apps should add an authenticated read session, signed read proof, or equivalent boundary before serving confidential content.
 
 ## Required Flows
@@ -41,13 +42,16 @@ The shopper flow is intentionally narrow:
 1. User presses `Connect`.
 2. Frontend requests MetaMask accounts.
 3. Frontend calls `GET /api/store/bootstrap?wallet_address=...&asset=yusd`.
-4. Frontend constructs `AppDefinitionV1` with shopper and app signer participants, both weight `1`, quorum `2`, and `nonce: BigInt(Date.now() * 1000000)`.
-5. Frontend encodes with `packCreateAppSessionRequestV1`.
-6. MetaMask signs the encoded payload.
-7. Frontend calls `POST /api/store/init`.
-8. Backend verifies the definition and shopper signature.
-9. Backend app-signs and calls `sdkClient.CreateAppSession`.
-10. Frontend receives success and shows the session as ready.
+4. If `channel_readiness.status` is not `ready`, the frontend asks the user to prepare the channel first.
+5. For `ack_required`, the browser SDK acknowledges the pending off-chain state and checkpoints when needed.
+6. For `deposit_required`, the browser SDK deposits the configured bootstrap amount from on-chain test tokens and checkpoints.
+7. Frontend constructs `AppDefinitionV1` with shopper and app signer participants, both weight `1`, quorum `2`, and `nonce: BigInt(Date.now() * 1000000)`.
+8. Frontend encodes with `packCreateAppSessionRequestV1`.
+9. MetaMask signs the encoded payload.
+10. Frontend calls `POST /api/store/init`.
+11. Backend verifies the definition and shopper signature.
+12. Backend app-signs and calls `sdkClient.CreateAppSession`.
+13. Frontend receives success and shows the session as ready.
 
 ### Deposit
 
@@ -60,10 +64,10 @@ The shopper flow is intentionally narrow:
 7. Frontend calls `POST /api/store/update`.
 8. Backend verifies the update, signature, version, participants, asset, and allocation delta.
 9. Backend persists a signed deposit checkpoint and returns the store app signature.
-10. Frontend submits to Clearnode with `submitAppSessionDeposit`.
+10. Frontend submits to Nitronode with `submitAppSessionDeposit`.
 11. Frontend refreshes bootstrap and shows the updated store balance.
 
-If the browser is closed or the Clearnode submit times out after step 9, bootstrap returns `pending_action` for the signed deposit. The frontend shows `Resume`, which reuses the stored signatures and does not ask MetaMask to sign again.
+If the browser is closed or the Nitronode submit times out after step 9, bootstrap returns `pending_action` for the signed deposit. The frontend shows `Resume`, which reuses the stored signatures and does not ask MetaMask to sign again.
 
 ### Withdraw
 
@@ -129,6 +133,7 @@ Optional:
 - `STORE_NAME=Nitrolite App Session Store`
 - `STORE_APP_ID=default`
 - `STORE_APP_PRIVATE_KEY=`
+- `STORE_CHANNEL_BOOTSTRAP_AMOUNTS={"yusd":"10","yellow":"10"}`
 
 ## Local Data
 

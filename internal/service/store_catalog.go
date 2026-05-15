@@ -60,6 +60,45 @@ func supportedStoreAssets(homeBlockchains map[string]uint64) []string {
 	return out
 }
 
+func normalizeHomeBlockchains(homeBlockchains map[string]uint64) map[string]uint64 {
+	out := make(map[string]uint64, len(homeBlockchains))
+	for asset, chainID := range homeBlockchains {
+		normalized := strings.ToLower(strings.TrimSpace(asset))
+		if normalized == "" {
+			continue
+		}
+		out[normalized] = chainID
+	}
+	return out
+}
+
+func defaultChannelBootstrapAmounts() map[string]string {
+	return map[string]string{
+		"yusd":   "10",
+		"yellow": "10",
+	}
+}
+
+func normalizeChannelBootstrapAmounts(raw map[string]string) map[string]string {
+	out := defaultChannelBootstrapAmounts()
+	for asset, amount := range raw {
+		normalized := strings.ToLower(strings.TrimSpace(asset))
+		amount = strings.TrimSpace(amount)
+		if normalized == "" || amount == "" {
+			continue
+		}
+		out[normalized] = amount
+	}
+	return out
+}
+
+func (s *WalletStoreService) channelBootstrapAmount(asset string) string {
+	if amount := strings.TrimSpace(s.channelBootstrapAmounts[strings.ToLower(strings.TrimSpace(asset))]); amount != "" {
+		return amount
+	}
+	return "10"
+}
+
 func strictBalancesForAsset(allocations []app.AppAllocationV1, userAddress string, appAddress string, asset string) (decimal.Decimal, decimal.Decimal, error) {
 	if len(allocations) != 2 {
 		return decimal.Zero, decimal.Zero, conflictf("app allocations must contain exactly wallet and app signer")
@@ -204,14 +243,14 @@ func seededCatalog() []StoreCatalogItem {
 		},
 		{
 			ID:          "3",
-			Title:       "Clearnode Field Guide",
-			Description: "A practical guide to following app-session state from wallet signature to Clearnode submission.",
+			Title:       "Nitronode Field Guide",
+			Description: "A practical guide to following app-session state from wallet signature to Nitronode submission.",
 			Type:        "guide",
 			Prices: map[string]string{
 				"yellow": "1.80",
 				"yusd":   "1.25",
 			},
-			Content: "Clearnode Field Guide\n\nA good store flow lets operators trace app-session versions, signatures, and allocation deltas without exposing that complexity to shoppers.",
+			Content: "Nitronode Field Guide\n\nA good store flow lets operators trace app-session versions, signatures, and allocation deltas without exposing that complexity to shoppers.",
 		},
 		{
 			ID:          "4",

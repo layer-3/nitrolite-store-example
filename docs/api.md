@@ -9,7 +9,15 @@ Query:
 - `wallet_address`
 - `asset`, optional, defaults to the configured default asset
 
-Returns store metadata, supported assets, available Clearnode balance, catalog, current wallet session state, wallet-owned library items, and an optional pending deposit action.
+Returns store metadata, supported assets, available signed home-channel balance, channel readiness, catalog, current wallet session state, wallet-owned library items, and an optional pending deposit action.
+
+`channel_readiness.status` is one of:
+
+- `ready`: the selected asset has a signed home-channel state with positive user balance.
+- `ack_required`: Nitronode has off-chain funds that need wallet acknowledgement.
+- `deposit_required`: the wallet can prepare a channel from on-chain test tokens.
+- `funds_required`: no usable off-chain or on-chain funds were found for the selected asset.
+- `unavailable`: Nitronode or the configured chain RPC could not be checked.
 
 Supported demo assets are `yusd` and `yellow`. `yusd` is the default walkthrough asset; `yellow` is retained as a second testnet asset for the same app-session flows.
 
@@ -55,7 +63,7 @@ Withdraw and purchase return:
 
 `app_state_update.intent` remains the Nitrolite protocol intent (`deposit`, `withdraw`, or `operate`). The nested `session_data.intent` is the store-level action (`user_deposit`, `user_withdraw`, or `purchase`).
 
-For deposits, the backend stores a checkpoint before returning the app signature. Bootstrap returns that checkpoint as `pending_action` until Clearnode reflects the submitted app session version, so the frontend can resume after reload without asking MetaMask to sign again.
+For deposits, the backend stores a checkpoint before returning the app signature. Bootstrap returns that checkpoint as `pending_action` until Nitronode reflects the submitted app session version, so the frontend can resume after reload without asking MetaMask to sign again.
 
 ## `GET /api/store/content/{id}`
 
