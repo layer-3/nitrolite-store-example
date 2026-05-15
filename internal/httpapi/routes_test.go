@@ -13,6 +13,7 @@ import (
 
 	"github.com/layer-3/nitrolite-store-example/internal/config"
 	"github.com/layer-3/nitrolite-store-example/internal/nitrolite"
+	"github.com/layer-3/nitrolite-store-example/internal/service"
 	"github.com/layer-3/nitrolite-store-example/internal/signing"
 	"github.com/layer-3/nitrolite-store-example/internal/store"
 	"github.com/layer-3/nitrolite-store-example/internal/testsupport"
@@ -292,6 +293,64 @@ func TestStoreBootstrapReportsUnavailableWhenDisconnected(t *testing.T) {
 	if payload.ChannelReadiness.Status != "unavailable" {
 		t.Fatalf("channel_readiness.status = %q, want unavailable", payload.ChannelReadiness.Status)
 	}
+}
+
+func TestWriteServiceErrorUnavailableUsesNitronodeCode(t *testing.T) {
+	t.Parallel()
+
+	rec := httptest.NewRecorder()
+
+	writeServiceError(rec, service.ErrUnavailable)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+
+	var payload errorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if payload.Error.Code != "nitronode_unavailable" {
+		t.Fatalf("error code = %q, want nitronode_unavailable", payload.Error.Code)
+	}
+	if payload.Error.Message != "nitronode not reachable" {
+		t.Fatalf("error message = %q, want nitronode not reachable", payload.Error.Message)
+	}
+}
+
+func TestWriteServiceErrorUpstreamUsesNitronodeCode(t *testing.T) {
+	t.Parallel()
+
+	rec := httptest.NewRecorder()
+
+	writeServiceError(rec, upstreamMappingError{})
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadGateway, rec.Body.String())
+	}
+
+	var payload errorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if payload.Error.Code != "nitronode_operation_failed" {
+		t.Fatalf("error code = %q, want nitronode_operation_failed", payload.Error.Code)
+	}
+}
+
+type upstreamMappingError struct{}
+
+func (upstreamMappingError) Error() string {
+	return "upstream mapping test"
+}
+
+func (upstreamMappingError) As(target any) bool {
+	upstreamErr, ok := target.(*service.UpstreamError)
+	if !ok {
+		return false
+	}
+	*upstreamErr = service.UpstreamError{}
+	return true
 }
 
 func newTestHandler(t *testing.T, client *testsupport.FakeClient) http.Handler {

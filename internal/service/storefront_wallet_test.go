@@ -1665,7 +1665,7 @@ func TestWalletStoreServiceSubmitPurchaseFailureDoesNotUnlockAndCanRetry(t *test
 
 	update, rpcUpdate, userSig := signedPurchaseUpdate(t, userSigner, appSigner, currentSession)
 	service.submitAppStateRPC = func(context.Context, string, rpc.AppSessionsV1SubmitAppStateRequest) error {
-		return errors.New("clearnode down")
+		return errors.New("nitronode rejected stale app version")
 	}
 
 	if _, err := service.SubmitUpdate(context.Background(), StoreUpdateRequest{
@@ -1673,7 +1673,9 @@ func TestWalletStoreServiceSubmitPurchaseFailureDoesNotUnlockAndCanRetry(t *test
 		AppStateUpdate: &rpcUpdate,
 		UserSignature:  userSig,
 	}); err == nil {
-		t.Fatal("SubmitUpdate() succeeded despite Clearnode error")
+		t.Fatal("SubmitUpdate() succeeded despite Nitronode error")
+	} else if got, want := err.Error(), "failed to submit app state: nitronode rejected stale app version"; got != want {
+		t.Fatalf("SubmitUpdate() error = %q, want %q", got, want)
 	}
 	owned, err := appStore.HasWalletPurchase(context.Background(), userSigner.Address(), "1", "yusd")
 	if err != nil {

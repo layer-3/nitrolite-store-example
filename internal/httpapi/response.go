@@ -53,12 +53,12 @@ func writeServiceError(w http.ResponseWriter, err error) {
 
 	var upstreamErr service.UpstreamError
 	if errors.As(err, &upstreamErr) {
-		writeError(w, http.StatusBadGateway, "clearnode_operation_failed", upstreamErr.Error())
+		writeError(w, http.StatusBadGateway, "nitronode_operation_failed", upstreamErr.Error())
 		return
 	}
 
 	if errors.Is(err, service.ErrUnavailable) {
-		writeError(w, http.StatusServiceUnavailable, "clearnode_unavailable", "clearnode not reachable")
+		writeError(w, http.StatusServiceUnavailable, "nitronode_unavailable", service.ErrUnavailable.Error())
 		return
 	}
 	writeError(w, http.StatusUnprocessableEntity, "sdk_operation_failed", err.Error())

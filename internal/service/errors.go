@@ -6,7 +6,7 @@ import (
 )
 
 // ErrUnavailable indicates the SDK client is not currently usable.
-var ErrUnavailable = errors.New("clearnode not reachable")
+var ErrUnavailable = errors.New("nitronode not reachable")
 
 // ValidationError represents invalid client-supplied input after request decoding.
 type ValidationError struct {
@@ -59,13 +59,19 @@ func (e ConflictError) Code() string {
 	return e.code
 }
 
-// UpstreamError represents a Clearnode operation failure.
+// UpstreamError represents a Nitronode operation failure.
 type UpstreamError struct {
 	message string
 	err     error
 }
 
 func (e UpstreamError) Error() string {
+	if e.err != nil && e.message != "" {
+		return fmt.Sprintf("%s: %v", e.message, e.err)
+	}
+	if e.err != nil {
+		return e.err.Error()
+	}
 	return e.message
 }
 

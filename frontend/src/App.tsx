@@ -875,8 +875,8 @@ export default function App() {
     } catch (withdrawError) {
       const message = withdrawError instanceof Error ? withdrawError.message : 'Failed to withdraw'
       setError(
-        message === 'failed to submit app state'
-          ? 'Nitronode rejected the withdraw state. Refreshed the session; try again.'
+        message.startsWith('failed to submit app state: ')
+          ? `Nitronode rejected the withdraw state: ${message.slice('failed to submit app state: '.length)}`
           : message,
       )
       try {
