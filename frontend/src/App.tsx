@@ -202,6 +202,7 @@ type StoreSessionKey = {
   address: Address
   expiresAt: string
   version: string
+  applicationIds: string[]
   appSessionIds: string[]
   active: boolean
 }
@@ -257,13 +258,18 @@ function loadStoredSessionKey(wallet?: string | null): StoreSessionKey | null {
     const raw = window.localStorage.getItem(STORED_SESSION_KEY)
     if (!raw) return null
     const parsed = JSON.parse(raw) as Partial<StoreSessionKey>
+    const applicationIds = Array.isArray(parsed.applicationIds)
+      ? parsed.applicationIds.filter((entry): entry is string => typeof entry === 'string')
+      : []
+    const appSessionIds = Array.isArray(parsed.appSessionIds)
+      ? parsed.appSessionIds.filter((entry): entry is string => typeof entry === 'string')
+      : []
     if (
       typeof parsed.wallet !== 'string'
       || typeof parsed.privateKey !== 'string'
       || typeof parsed.address !== 'string'
       || typeof parsed.expiresAt !== 'string'
       || typeof parsed.version !== 'string'
-      || !Array.isArray(parsed.appSessionIds)
       || !parsed.active
     ) {
       return null
@@ -276,7 +282,8 @@ function loadStoredSessionKey(wallet?: string | null): StoreSessionKey | null {
       address: parsed.address as Address,
       expiresAt: parsed.expiresAt,
       version: parsed.version,
-      appSessionIds: parsed.appSessionIds.filter((entry): entry is string => typeof entry === 'string'),
+      applicationIds,
+      appSessionIds,
       active: true,
     }
   } catch {
@@ -307,8 +314,20 @@ function pickLatestSessionKeyState(states: AppSessionKeyStateV1[]): AppSessionKe
   }, null)
 }
 
-function uniqueStrings(values: string[]): string[] {
-  return Array.from(new Set(values.filter(Boolean)))
+function sessionKeyHasStoreScope(key: StoreSessionKey, bootstrap: StoreBootstrap): boolean {
+  return key.applicationIds.some((id) => id.toLowerCase() === bootstrap.app_id.toLowerCase())
+}
+
+function sessionKeyHasCurrentSessionScope(key: StoreSessionKey, bootstrap: StoreBootstrap): boolean {
+  const appSessionID = bootstrap.session.app_session_id
+  return Boolean(appSessionID && key.appSessionIds.some((id) => id.toLowerCase() === appSessionID.toLowerCase()))
+}
+
+function isUsableSessionKeyForBootstrap(key: StoreSessionKey | null, wallet: string | null, bootstrap: StoreBootstrap | null): key is StoreSessionKey {
+  if (!key || !wallet || !bootstrap || !key.active) return false
+  if (normalizeAddress(key.wallet) !== normalizeAddress(wallet)) return false
+  if (Number(key.expiresAt) <= Math.floor(Date.now() / 1000)) return false
+  return sessionKeyHasStoreScope(key, bootstrap) || sessionKeyHasCurrentSessionScope(key, bootstrap)
 }
 
 function packCurrentAppSessionKeyState(state: AppSessionKeyStateV1): Hex {
@@ -685,18 +704,14 @@ export default function App() {
   )
   const pendingDepositExceedsAvailable = Boolean(bootstrap && pendingDepositValue?.greaterThan(0) && pendingDepositValue.greaterThan(availableBalance))
   const activeSessionKey = useMemo(() => {
-    if (!walletAddress || !bootstrap?.session.app_session_id || !sessionKey?.active) return null
-    if (normalizeAddress(sessionKey.wallet) !== normalizeAddress(walletAddress)) return null
-    if (!sessionKey.appSessionIds.some((id) => id.toLowerCase() === bootstrap.session.app_session_id?.toLowerCase())) return null
-    if (Number(sessionKey.expiresAt) <= Math.floor(Date.now() / 1000)) return null
-    return sessionKey
-  }, [bootstrap?.session.app_session_id, sessionKey, walletAddress])
+    return isUsableSessionKeyForBootstrap(sessionKey, walletAddress, bootstrap) ? sessionKey : null
+  }, [bootstrap, sessionKey, walletAddress])
   const canPrepareChannel = Boolean(walletAddress && nitroliteClient && bootstrap && busy === null && canRunChannelSetup)
   const canDeposit = Boolean(walletAddress && sessionReady && channelReady && busy === null && isPositiveAmount(depositAmount) && !depositPrecisionError && !depositExceedsAvailable)
   const canWithdraw = Boolean(walletAddress && sessionReady && channelReady && busy === null && isPositiveAmount(withdrawAmount) && !withdrawPrecisionError)
   const canResumeDeposit = Boolean(walletAddress && nitroliteClient && pendingDeposit && busy === null && !pendingDepositExceedsAvailable)
   const canCreateSession = Boolean(sessionNeedsStart && walletAddress && walletClient && busy === null && channelReady)
-  const canManageSessionKey = Boolean(walletAddress && nitroliteClient && sessionReady && busy === null)
+  const canManageSessionKey = Boolean(walletAddress && walletClient && nitroliteClient && bootstrap && busy === null)
 
   function appendLog(line: string) {
     const stamped = `${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} ${line}`
@@ -717,15 +732,35 @@ export default function App() {
     }
   }
 
-  async function hydrateWallet(provider: InjectedProvider, wallet: string, asset: string, label: string) {
+  async function hydrateWallet(
+    provider: InjectedProvider,
+    wallet: string,
+    asset: string,
+    label: string,
+    options: { enableQuickApprovals?: boolean } = {},
+  ) {
     await ensureSepolia(provider)
     const { client, nitrolite } = await createWalletConnections(provider, wallet)
+    const restoredSessionKey = loadStoredSessionKey(wallet)
     setWalletAddress(wallet)
     setWalletClient(client)
     setNitroliteClient(nitrolite)
-    setSessionKey(loadStoredSessionKey(wallet))
+    setSessionKey(restoredSessionKey)
     appendLog(`${label} ${shortAddress(wallet)}`)
-    await refreshBootstrap(asset, wallet)
+    const nextBootstrap = await refreshBootstrap(asset, wallet)
+
+    if (options.enableQuickApprovals && !isUsableSessionKeyForBootstrap(restoredSessionKey, wallet, nextBootstrap)) {
+      try {
+        const nextSessionKey = await enableStoreSessionKey(wallet, client, nitrolite, nextBootstrap, restoredSessionKey)
+        persistSessionKey(nextSessionKey)
+        setSessionKey(nextSessionKey)
+        appendLog(`quick approvals enabled ${shortAddress(nextSessionKey.address)}`)
+      } catch (sessionKeyError) {
+        setError(sessionKeyError instanceof Error
+          ? `Quick approvals were not enabled: ${sessionKeyError.message}`
+          : 'Quick approvals were not enabled.')
+      }
+    }
   }
 
   useEffect(() => {
@@ -790,7 +825,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  async function refreshBootstrap(asset: string, walletOverride?: string | null) {
+  async function refreshBootstrap(asset: string, walletOverride?: string | null): Promise<StoreBootstrap> {
     const wallet = walletOverride ?? walletAddress
     if (!wallet) {
       throw new Error('Connect a wallet before bootstrapping the store.')
@@ -802,6 +837,7 @@ export default function App() {
     setSelectedAsset(next.selected_asset)
     persistAsset(next.selected_asset)
     appendLog(`bootstrap ${asset.toUpperCase()} -> ${sessionStatusLabel(next.session.status)}`)
+    return next
   }
 
   async function connectWallet() {
@@ -821,7 +857,7 @@ export default function App() {
         throw new Error('MetaMask did not return an account.')
       }
 
-      await hydrateWallet(provider, wallet, selectedAsset, 'wallet connected')
+      await hydrateWallet(provider, wallet, selectedAsset, 'wallet connected', { enableQuickApprovals: true })
     } catch (connectError) {
       setError(connectError instanceof Error ? connectError.message : 'Failed to connect wallet')
     } finally {
@@ -874,16 +910,15 @@ export default function App() {
     }
   }
 
-  async function signSessionKeyStateWithLocalKey(state: AppSessionKeyStateV1, privateKey: Hex): Promise<StoreSessionKeyState> {
-    if (!nitroliteClient) throw new Error('Connect a wallet before managing quick approvals.')
-    if (!walletClient) throw new Error('Connect a wallet before managing quick approvals.')
-    const activeWallet = (await walletClient?.getAddresses().catch(() => []))?.[0]
+  async function signSessionKeyStateWithLocalKey(state: AppSessionKeyStateV1, privateKey: Hex, signingClient = walletClient): Promise<StoreSessionKeyState> {
+    if (!signingClient) throw new Error('Connect a wallet before managing quick approvals.')
+    const activeWallet = (await signingClient.getAddresses().catch(() => []))?.[0]
     if (activeWallet && normalizeAddress(activeWallet) !== normalizeAddress(state.user_address)) {
       throw new Error(`MetaMask is currently on ${shortAddress(activeWallet)}, but this store session is connected as ${shortAddress(state.user_address)}. Reconnect the wallet and try again.`)
     }
     const packed = packCurrentAppSessionKeyState(state)
     const sessionKeySig = await new LocalSessionKeySigner(privateKey).signMessage(packed)
-    const userSig = await walletClient.signMessage({
+    const userSig = await signingClient.signMessage({
       account: state.user_address as Address,
       message: { raw: packed },
     })
@@ -896,43 +931,54 @@ export default function App() {
     }
   }
 
+  async function enableStoreSessionKey(
+    wallet: string,
+    signingClient: WalletClient,
+    client: Client,
+    nextBootstrap: StoreBootstrap,
+    currentSessionKey: StoreSessionKey | null,
+  ): Promise<StoreSessionKey> {
+    const existing = currentSessionKey && normalizeAddress(currentSessionKey.wallet) === normalizeAddress(wallet) ? currentSessionKey : null
+    const privateKey = existing?.privateKey ?? generatePrivateKey()
+    const account = privateKeyToAccount(privateKey)
+    const existingStates = await client.getLastKeyStates(wallet, account.address)
+    const latest = pickLatestSessionKeyState(existingStates)
+    const applicationIds = [nextBootstrap.app_id]
+    const expiresAt = String(Math.floor(Date.now() / 1000) + SESSION_KEY_TTL_SECONDS)
+    const nextState: AppSessionKeyStateV1 = {
+      user_address: wallet,
+      session_key: account.address,
+      version: String((latest ? Number(latest.version) : 0) + 1),
+      application_ids: applicationIds,
+      app_session_ids: [],
+      expires_at: expiresAt,
+      user_sig: '',
+    }
+    const signedState = await signSessionKeyStateWithLocalKey(nextState, privateKey, signingClient)
+    await client.submitSessionKeyState(signedState)
+
+    return {
+      wallet,
+      privateKey,
+      address: account.address,
+      expiresAt,
+      version: nextState.version,
+      applicationIds,
+      appSessionIds: [],
+      active: true,
+    }
+  }
+
   async function enableSessionKey() {
-    if (!walletAddress || !nitroliteClient || !bootstrap?.session.app_session_id) return
+    if (!walletAddress || !walletClient || !nitroliteClient || !bootstrap) return
 
     setBusy('session-key')
     setError(null)
     try {
-      const existing = sessionKey && normalizeAddress(sessionKey.wallet) === normalizeAddress(walletAddress) ? sessionKey : null
-      const privateKey = existing?.privateKey ?? generatePrivateKey()
-      const account = privateKeyToAccount(privateKey)
-      const existingStates = await nitroliteClient.getLastKeyStates(walletAddress, account.address)
-      const latest = pickLatestSessionKeyState(existingStates)
-      const appSessionIds = uniqueStrings([...(latest?.app_session_ids ?? []), bootstrap.session.app_session_id])
-      const expiresAt = String(Math.floor(Date.now() / 1000) + SESSION_KEY_TTL_SECONDS)
-      const nextState: AppSessionKeyStateV1 = {
-        user_address: walletAddress,
-        session_key: account.address,
-        version: String((latest ? Number(latest.version) : 0) + 1),
-        application_ids: latest?.application_ids ?? [],
-        app_session_ids: appSessionIds,
-        expires_at: expiresAt,
-        user_sig: '',
-      }
-      const signedState = await signSessionKeyStateWithLocalKey(nextState, privateKey)
-      await nitroliteClient.submitSessionKeyState(signedState)
-
-      const saved: StoreSessionKey = {
-        wallet: walletAddress,
-        privateKey,
-        address: account.address,
-        expiresAt,
-        version: nextState.version,
-        appSessionIds,
-        active: true,
-      }
+      const saved = await enableStoreSessionKey(walletAddress, walletClient, nitroliteClient, bootstrap, sessionKey)
       persistSessionKey(saved)
       setSessionKey(saved)
-      appendLog(`quick approvals enabled ${shortAddress(account.address)}`)
+      appendLog(`quick approvals enabled ${shortAddress(saved.address)}`)
     } catch (sessionKeyError) {
       setError(sessionKeyError instanceof Error ? sessionKeyError.message : 'Failed to enable quick approvals')
     } finally {
@@ -1502,7 +1548,7 @@ export default function App() {
             {bootstrap ? parseSessionDataLabel(bootstrap.session.session_data) : 'Connect wallet to load the store.'}
           </p>
 
-          {sessionReady ? (
+          {walletAddress && bootstrap ? (
             <div className="mt-4 flex flex-col gap-3 rounded-lg border border-black/10 bg-white/90 p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
               <div className="min-w-0">
                 <p className="flex items-center gap-2 text-sm font-black uppercase tracking-normal text-ink">
@@ -1511,8 +1557,8 @@ export default function App() {
                 </p>
                 <p className="mt-1 text-sm font-semibold leading-5 text-black/60">
                   {activeSessionKey
-                    ? `Using local session key ${shortAddress(activeSessionKey.address)} for store updates.`
-                    : 'Optional local session key for purchases, deposits, and withdrawals in this store session.'}
+                    ? `Using local session key ${shortAddress(activeSessionKey.address)} for this store.`
+                    : 'Enable quick approvals for purchases, deposits, and withdrawals in this store.'}
                 </p>
               </div>
               <ActionButton

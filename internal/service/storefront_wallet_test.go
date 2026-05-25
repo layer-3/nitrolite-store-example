@@ -1146,7 +1146,7 @@ func TestWalletStoreServiceSubmitWithdrawAcceptsIntentOnlySessionData(t *testing
 	}
 }
 
-func TestWalletStoreServiceSubmitAppStateAcceptsAuthorizedSessionKey(t *testing.T) {
+func TestWalletStoreServiceSubmitAppStateAcceptsAuthorizedAppScopedSessionKey(t *testing.T) {
 	t.Parallel()
 
 	userSigner := mustTestSigner(t)
@@ -1189,8 +1189,8 @@ func TestWalletStoreServiceSubmitAppStateAcceptsAuthorizedSessionKey(t *testing.
 				UserAddress:    userSigner.Address(),
 				SessionKey:     sessionKeySigner.Address(),
 				Version:        1,
-				AppSessionIDs:  []string{currentSession.AppSessionID},
-				ApplicationIDs: []string{},
+				AppSessionIDs:  []string{},
+				ApplicationIDs: []string{"store"},
 				ExpiresAt:      now.Add(time.Hour),
 				UserSig:        "0xusersig",
 			}}, nil
@@ -1274,7 +1274,7 @@ func TestWalletStoreServiceSubmitAppStateAcceptsAuthorizedSessionKey(t *testing.
 	}
 }
 
-func TestWalletStoreServiceSubmitAppStateRejectsSessionKeyOutsideSession(t *testing.T) {
+func TestWalletStoreServiceSubmitAppStateRejectsSessionKeyOutsideStoreScope(t *testing.T) {
 	t.Parallel()
 
 	userSigner := mustTestSigner(t)
@@ -1310,7 +1310,7 @@ func TestWalletStoreServiceSubmitAppStateRejectsSessionKeyOutsideSession(t *test
 				SessionKey:     sessionKeySigner.Address(),
 				Version:        1,
 				AppSessionIDs:  []string{"0x00000000000000000000000000000000000000000000000000000000000000cc"},
-				ApplicationIDs: []string{},
+				ApplicationIDs: []string{"other-store"},
 				ExpiresAt:      time.Now().Add(time.Hour),
 				UserSig:        "0xusersig",
 			}}, nil
@@ -1378,7 +1378,7 @@ func TestWalletStoreServiceSubmitAppStateRejectsSessionKeyOutsideSession(t *test
 		UserSignature:  userSig,
 	})
 	if err == nil {
-		t.Fatal("SubmitUpdate() accepted session key outside current app session")
+		t.Fatal("SubmitUpdate() accepted session key outside current store scope")
 	}
 	var conflict ConflictError
 	if !errors.As(err, &conflict) || conflict.Code() != "invalid_signature" {
