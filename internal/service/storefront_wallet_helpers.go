@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/layer-3/nitrolite/pkg/app"
 	"github.com/layer-3/nitrolite/pkg/rpc"
+	sdk "github.com/layer-3/nitrolite/sdk/go"
 	"github.com/shopspring/decimal"
 )
 
@@ -78,15 +80,71 @@ func verifyAppStateSignature(walletAddress string, update app.AppStateUpdateV1, 
 }
 
 func verifyWalletAppPayloadSignature(walletAddress string, payload []byte, signatureHex string) error {
+	return verifyAppPayloadSignature(walletAddress, payload, signatureHex, func(string) (string, error) {
+		return "", conflictf("session keys are not enabled")
+	})
+}
+
+func (s *WalletStoreService) verifyAppStateSignature(ctx context.Context, walletAddress string, update app.AppStateUpdateV1, signatureHex string) error {
+	payload, err := app.PackAppStateUpdateV1(update)
+	if err != nil {
+		return fmt.Errorf("failed to pack app state update: %w", err)
+	}
+	return verifyAppPayloadSignature(walletAddress, payload, signatureHex, s.appSessionKeyOwner(ctx, walletAddress, update.AppSessionID))
+}
+
+func verifyAppPayloadSignature(walletAddress string, payload []byte, signatureHex string, ownerGetter app.GetAppSessionKeyOwnerFuncV1) error {
 	sigBytes, err := hexutil.Decode(strings.TrimSpace(signatureHex))
 	if err != nil {
 		return invalidCodef("invalid_signature", "invalid user_signature")
 	}
-	validator := app.NewAppSessionKeySigValidatorV1(func(string) (string, error) {
-		return "", conflictf("session keys are not enabled")
-	})
+	validator := app.NewAppSessionKeySigValidatorV1(ownerGetter)
 	if err := validator.Verify(walletAddress, payload, sigBytes); err != nil {
 		return conflictCodef("invalid_signature", "invalid app session signature")
 	}
 	return nil
+}
+
+func (s *WalletStoreService) appSessionKeyOwner(ctx context.Context, walletAddress string, appSessionID string) app.GetAppSessionKeyOwnerFuncV1 {
+	return func(sessionKeyAddress string) (string, error) {
+		client, _, err := activeClient(s.provider)
+		if err != nil {
+			return "", err
+		}
+		states, err := client.GetLastAppKeyStates(ctx, walletAddress, &sdk.GetLastKeyStatesOptions{
+			SessionKey: &sessionKeyAddress,
+		})
+		if err != nil {
+			return "", err
+		}
+		if !s.hasActiveAppSessionKeyState(states, walletAddress, sessionKeyAddress, appSessionID) {
+			return "", conflictf("session key is not authorized for this store session")
+		}
+		return walletAddress, nil
+	}
+}
+
+func (s *WalletStoreService) hasActiveAppSessionKeyState(states []app.AppSessionKeyStateV1, walletAddress string, sessionKeyAddress string, appSessionID string) bool {
+	for _, state := range states {
+		if !strings.EqualFold(state.UserAddress, walletAddress) {
+			continue
+		}
+		if !strings.EqualFold(state.SessionKey, sessionKeyAddress) {
+			continue
+		}
+		if !state.ExpiresAt.After(s.now()) {
+			continue
+		}
+		for _, allowedSessionID := range state.AppSessionIDs {
+			if strings.EqualFold(allowedSessionID, appSessionID) {
+				return true
+			}
+		}
+		for _, allowedAppID := range state.ApplicationIDs {
+			if strings.EqualFold(allowedAppID, s.appID) {
+				return true
+			}
+		}
+	}
+	return false
 }

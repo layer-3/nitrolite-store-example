@@ -82,10 +82,11 @@ func TestStoreBootstrapWithWalletAddress(t *testing.T) {
 	}
 
 	var payload struct {
-		WalletAddress    string   `json:"wallet_address"`
-		SelectedAsset    string   `json:"selected_asset"`
-		SupportedAssets  []string `json:"supported_assets"`
-		AvailableBalance string   `json:"available_balance"`
+		WalletAddress    string           `json:"wallet_address"`
+		SelectedAsset    string           `json:"selected_asset"`
+		SupportedAssets  []string         `json:"supported_assets"`
+		AssetDecimals    map[string]uint8 `json:"asset_decimals"`
+		AvailableBalance string           `json:"available_balance"`
 		ChannelReadiness struct {
 			Status                  string `json:"status"`
 			HomeBlockchainID        uint64 `json:"home_blockchain_id"`
@@ -113,6 +114,12 @@ func TestStoreBootstrapWithWalletAddress(t *testing.T) {
 	}
 	if !reflect.DeepEqual(payload.SupportedAssets, []string{"yusd", "yellow"}) {
 		t.Fatalf("supported_assets = %#v, want yusd/yellow", payload.SupportedAssets)
+	}
+	if payload.AssetDecimals["yusd"] != 6 {
+		t.Fatalf("asset_decimals[yusd] = %d, want 6", payload.AssetDecimals["yusd"])
+	}
+	if payload.AssetDecimals["yellow"] != 18 {
+		t.Fatalf("asset_decimals[yellow] = %d, want 18", payload.AssetDecimals["yellow"])
 	}
 	if payload.AvailableBalance != "7" {
 		t.Fatalf("available_balance = %q, want 7", payload.AvailableBalance)

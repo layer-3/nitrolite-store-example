@@ -25,6 +25,7 @@ type StoreBootstrapResponse struct {
 	SelectedAsset    string                `json:"selected_asset"`
 	DefaultAsset     string                `json:"default_asset"`
 	SupportedAssets  []string              `json:"supported_assets"`
+	AssetDecimals    map[string]uint8      `json:"asset_decimals"`
 	AvailableBalance string                `json:"available_balance"`
 	ChannelReadiness StoreChannelReadiness `json:"channel_readiness"`
 	Catalog          []StoreCatalogItem    `json:"catalog"`
@@ -174,6 +175,7 @@ func (s *WalletStoreService) Bootstrap(ctx context.Context, walletAddress string
 	if err != nil {
 		return nil, err
 	}
+	assetDecimals := s.assetDecimals(ctx)
 	readiness := s.channelReadiness(ctx, walletAddress, asset)
 	availableBalance := readiness.AvailableBalance
 	session := StoreShopperSession{
@@ -229,6 +231,7 @@ func (s *WalletStoreService) Bootstrap(ctx context.Context, walletAddress string
 		SelectedAsset:    asset,
 		DefaultAsset:     s.defaultAsset,
 		SupportedAssets:  append([]string(nil), s.supportedAssets...),
+		AssetDecimals:    assetDecimals,
 		AvailableBalance: availableBalance,
 		ChannelReadiness: readiness,
 		Catalog:          catalog,
@@ -361,7 +364,13 @@ func (s *WalletStoreService) SubmitUpdate(ctx context.Context, req StoreUpdateRe
 		return nil, invalidf("app_state_update is required")
 	}
 
-	update, err := appStateUpdateFromRPC(*req.AppStateUpdate)
+	normalizedRPCUpdate, err := s.normalizeAppStateUpdateForAsset(ctx, asset, *req.AppStateUpdate)
+	if err != nil {
+		return nil, err
+	}
+	req.AppStateUpdate = &normalizedRPCUpdate
+
+	update, err := appStateUpdateFromRPC(normalizedRPCUpdate)
 	if err != nil {
 		return nil, err
 	}
@@ -394,7 +403,7 @@ func (s *WalletStoreService) submitDeposit(ctx context.Context, asset string, re
 	if err := s.validateSessionParticipants(current, walletAddress); err != nil {
 		return nil, err
 	}
-	if err := verifyAppStateSignature(walletAddress, update, req.UserSignature); err != nil {
+	if err := s.verifyAppStateSignature(ctx, walletAddress, update, req.UserSignature); err != nil {
 		return nil, err
 	}
 
@@ -470,7 +479,7 @@ func (s *WalletStoreService) submitAppStateUpdate(ctx context.Context, asset str
 	if err := s.validateSessionParticipants(current, walletAddress); err != nil {
 		return nil, err
 	}
-	if err := verifyAppStateSignature(walletAddress, update, req.UserSignature); err != nil {
+	if err := s.verifyAppStateSignature(ctx, walletAddress, update, req.UserSignature); err != nil {
 		return nil, err
 	}
 
@@ -578,6 +587,81 @@ func (s *WalletStoreService) normalizeAsset(raw string) (string, error) {
 		}
 	}
 	return "", invalidf("unsupported asset")
+}
+
+func (s *WalletStoreService) assetDecimals(ctx context.Context) map[string]uint8 {
+	defaults := defaultAssetDecimals()
+	out := make(map[string]uint8, len(s.supportedAssets))
+	supported := make(map[string]struct{}, len(s.supportedAssets))
+	for _, asset := range s.supportedAssets {
+		supported[asset] = struct{}{}
+		if decimals, ok := defaults[asset]; ok {
+			out[asset] = decimals
+		}
+	}
+
+	client, _, err := activeClient(s.provider)
+	if err != nil {
+		return out
+	}
+	assets, err := client.GetAssets(ctx, nil)
+	if err != nil {
+		return out
+	}
+	for _, info := range assets {
+		for _, key := range []string{info.Symbol, info.Name} {
+			asset := strings.ToLower(strings.TrimSpace(key))
+			if _, ok := supported[asset]; ok {
+				out[asset] = info.Decimals
+			}
+		}
+	}
+	return out
+}
+
+func (s *WalletStoreService) assetDecimalsFor(ctx context.Context, asset string) uint8 {
+	asset = strings.ToLower(strings.TrimSpace(asset))
+	if decimals, ok := s.assetDecimals(ctx)[asset]; ok {
+		return decimals
+	}
+	if decimals, ok := defaultAssetDecimals()[asset]; ok {
+		return decimals
+	}
+	return 18
+}
+
+func (s *WalletStoreService) normalizeAppStateUpdateForAsset(ctx context.Context, asset string, update rpc.AppStateUpdateV1) (rpc.AppStateUpdateV1, error) {
+	decimals := s.assetDecimalsFor(ctx, asset)
+	normalized := update
+	normalized.Allocations = make([]rpc.AppAllocationV1, 0, len(update.Allocations))
+	for _, allocation := range update.Allocations {
+		allocationAsset := strings.ToLower(strings.TrimSpace(allocation.Asset))
+		if allocationAsset != asset {
+			return rpc.AppStateUpdateV1{}, conflictf("app allocation asset does not match selected asset")
+		}
+		amount, err := decimal.NewFromString(strings.TrimSpace(allocation.Amount))
+		if err != nil {
+			return rpc.AppStateUpdateV1{}, invalidf("invalid app_state_update allocation amount")
+		}
+		if amount.IsNegative() {
+			return rpc.AppStateUpdateV1{}, conflictf("app allocation amount cannot be negative")
+		}
+		normalizedAmount, err := normalizeAssetAmountForWire(asset, amount, decimals)
+		if err != nil {
+			return rpc.AppStateUpdateV1{}, err
+		}
+		allocation.Asset = allocationAsset
+		allocation.Amount = normalizedAmount
+		normalized.Allocations = append(normalized.Allocations, allocation)
+	}
+	return normalized, nil
+}
+
+func normalizeAssetAmountForWire(asset string, amount decimal.Decimal, decimals uint8) (string, error) {
+	if !amount.Equal(amount.Truncate(int32(decimals))) {
+		return "", invalidf("%s supports up to %d decimals", strings.ToUpper(asset), decimals)
+	}
+	return amount.StringFixed(int32(decimals)), nil
 }
 
 func (s *WalletStoreService) availableBalance(ctx context.Context, walletAddress string, asset string) (string, error) {

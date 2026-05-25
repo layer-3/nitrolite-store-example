@@ -79,6 +79,13 @@ func defaultChannelBootstrapAmounts() map[string]string {
 	}
 }
 
+func defaultAssetDecimals() map[string]uint8 {
+	return map[string]uint8{
+		"yusd":   6,
+		"yellow": 18,
+	}
+}
+
 func normalizeChannelBootstrapAmounts(raw map[string]string) map[string]string {
 	out := defaultChannelBootstrapAmounts()
 	for asset, amount := range raw {

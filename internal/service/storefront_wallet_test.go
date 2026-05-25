@@ -19,6 +19,7 @@ import (
 	"github.com/layer-3/nitrolite/pkg/app"
 	"github.com/layer-3/nitrolite/pkg/core"
 	"github.com/layer-3/nitrolite/pkg/rpc"
+	"github.com/layer-3/nitrolite/pkg/sign"
 	sdk "github.com/layer-3/nitrolite/sdk/go"
 	"github.com/shopspring/decimal"
 )
@@ -260,6 +261,45 @@ func TestWalletStoreServiceBootstrapReportsAckRequiredChannel(t *testing.T) {
 	}
 	if resp.ChannelReadiness.RequiresChannelCreation {
 		t.Fatal("requires_channel_creation = true, want false")
+	}
+}
+
+func TestWalletStoreServiceBootstrapIncludesAssetDecimals(t *testing.T) {
+	t.Parallel()
+
+	appSigner := mustStoreAppSigner(t)
+	client := &testsupport.FakeClient{
+		GetAssetsFunc: func(context.Context, *uint64) ([]core.Asset, error) {
+			return []core.Asset{
+				{Symbol: "YUSD", Decimals: 6},
+				{Symbol: "YELLOW", Decimals: 18},
+			}, nil
+		},
+		GetLatestStateFunc: func(_ context.Context, wallet string, asset string, _ bool) (*core.State, error) {
+			return fundedHomeState(wallet, asset, "5"), nil
+		},
+	}
+	manager := nitrolite.NewManagerWithClient(client, nitrolite.Health{
+		Connected:     true,
+		Ready:         true,
+		SignerAddress: appSigner.Address(),
+	}, slog.Default())
+	appStore, err := store.New(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = appStore.Close() })
+
+	service := NewWalletStoreService(manager, appStore, appSigner, "Nitrolite App Session Store", "store", map[string]uint64{"yusd": 11155111, "yellow": 11155111}, "wss://example.invalid")
+	resp, err := service.Bootstrap(context.Background(), "0x1111111111111111111111111111111111111111", "yusd")
+	if err != nil {
+		t.Fatalf("Bootstrap() error = %v", err)
+	}
+	if resp.AssetDecimals["yusd"] != 6 {
+		t.Fatalf("asset_decimals[yusd] = %d, want 6", resp.AssetDecimals["yusd"])
+	}
+	if resp.AssetDecimals["yellow"] != 18 {
+		t.Fatalf("asset_decimals[yellow] = %d, want 18", resp.AssetDecimals["yellow"])
 	}
 }
 
@@ -723,14 +763,282 @@ func TestWalletStoreServiceSubmitAppStateForwardsExactPayload(t *testing.T) {
 		t.Fatalf("SubmitUpdate() error = %v", err)
 	}
 
-	if !reflect.DeepEqual(captured.AppStateUpdate, rpcUpdate) {
-		t.Fatalf("app_state_update mismatch\n got: %#v\nwant: %#v", captured.AppStateUpdate, rpcUpdate)
+	expectedRPCUpdate := rpcUpdate
+	expectedRPCUpdate.Allocations = []rpc.AppAllocationV1{
+		{Participant: userSigner.Address(), Asset: "yusd", Amount: "0.500000"},
+		{Participant: appSigner.Address(), Asset: "yusd", Amount: "0.000000"},
+	}
+	if !reflect.DeepEqual(captured.AppStateUpdate, expectedRPCUpdate) {
+		t.Fatalf("app_state_update mismatch\n got: %#v\nwant: %#v", captured.AppStateUpdate, expectedRPCUpdate)
 	}
 	if len(captured.QuorumSigs) != 2 || captured.QuorumSigs[0] != userSig || captured.QuorumSigs[1] == "" {
 		t.Fatalf("unexpected quorum signatures = %#v", captured.QuorumSigs)
 	}
 	if resp.Bootstrap == nil || resp.Bootstrap.Session.Version != 2 || resp.Bootstrap.Session.UserAllocation != "0.5" {
 		t.Fatalf("unexpected response = %#v", resp)
+	}
+}
+
+func TestWalletStoreServiceSubmitWithdrawNormalizesYUSDTrailingScaleBeforeNitronode(t *testing.T) {
+	t.Parallel()
+
+	userSigner := mustTestSigner(t)
+	appSigner := mustStoreAppSigner(t)
+	currentSession := app.AppSessionInfoV1{
+		AppSessionID: "0xsession",
+		AppDefinition: app.AppDefinitionV1{
+			ApplicationID: "store",
+			Participants: []app.AppParticipantV1{
+				{WalletAddress: userSigner.Address(), SignatureWeight: 1},
+				{WalletAddress: appSigner.Address(), SignatureWeight: 1},
+			},
+			Quorum: 2,
+			Nonce:  1,
+		},
+		Version:     1,
+		SessionData: `{"intent":"user_deposit"}`,
+		Allocations: []app.AppAllocationV1{
+			{Participant: userSigner.Address(), Asset: "yusd", Amount: decimal.RequireFromString("1")},
+			{Participant: appSigner.Address(), Asset: "yusd", Amount: decimal.Zero},
+		},
+	}
+	service, appStore := newWalletStoreServiceForTest(t, userSigner, appSigner, &currentSession)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	service.now = func() time.Time { return now }
+	if err := appStore.UpsertWalletSession(context.Background(), store.WalletStoreSession{
+		WalletAddress:  userSigner.Address(),
+		Asset:          "yusd",
+		AppSessionID:   currentSession.AppSessionID,
+		Status:         "open",
+		Version:        currentSession.Version,
+		UserAllocation: "1",
+		AppAllocation:  "0",
+		SessionData:    currentSession.SessionData,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}); err != nil {
+		t.Fatalf("UpsertWalletSession() error = %v", err)
+	}
+
+	update := app.AppStateUpdateV1{
+		AppSessionID: currentSession.AppSessionID,
+		Intent:       app.AppStateUpdateIntentWithdraw,
+		Version:      2,
+		Allocations: []app.AppAllocationV1{
+			{Participant: userSigner.Address(), Asset: "yusd", Amount: decimal.RequireFromString("0.100000000000000000")},
+			{Participant: appSigner.Address(), Asset: "yusd", Amount: decimal.Zero},
+		},
+		SessionData: `{"intent":"user_withdraw","amount":"0.900000000000000000"}`,
+	}
+	userSig, err := signAppStateUpdate(update, userSigner)
+	if err != nil {
+		t.Fatalf("signAppStateUpdate() error = %v", err)
+	}
+	rpcUpdate := rpc.AppStateUpdateV1{
+		AppSessionID: update.AppSessionID,
+		Intent:       update.Intent,
+		Version:      "2",
+		Allocations: []rpc.AppAllocationV1{
+			{Participant: userSigner.Address(), Asset: "yusd", Amount: "0.100000000000000000"},
+			{Participant: appSigner.Address(), Asset: "yusd", Amount: "0.000000000000000000"},
+		},
+		SessionData: update.SessionData,
+	}
+
+	var captured rpc.AppSessionsV1SubmitAppStateRequest
+	service.submitAppStateRPC = func(ctx context.Context, wsURL string, req rpc.AppSessionsV1SubmitAppStateRequest) error {
+		captured = req
+		currentSession.Version = update.Version
+		currentSession.SessionData = update.SessionData
+		currentSession.Allocations = update.Allocations
+		return nil
+	}
+
+	if _, err := service.SubmitUpdate(context.Background(), StoreUpdateRequest{
+		Asset:          "yusd",
+		AppStateUpdate: &rpcUpdate,
+		UserSignature:  userSig,
+	}); err != nil {
+		t.Fatalf("SubmitUpdate() error = %v", err)
+	}
+
+	if got := captured.AppStateUpdate.Allocations[0].Amount; got != "0.100000" {
+		t.Fatalf("captured wallet amount = %q, want 0.100000", got)
+	}
+	if got := captured.AppStateUpdate.Allocations[1].Amount; got != "0.000000" {
+		t.Fatalf("captured app amount = %q, want 0.000000", got)
+	}
+}
+
+func TestWalletStoreServiceSubmitWithdrawRejectsRealYUSDOverPrecision(t *testing.T) {
+	t.Parallel()
+
+	userSigner := mustTestSigner(t)
+	appSigner := mustStoreAppSigner(t)
+	currentSession := app.AppSessionInfoV1{
+		AppSessionID: "0xsession",
+		AppDefinition: app.AppDefinitionV1{
+			ApplicationID: "store",
+			Participants: []app.AppParticipantV1{
+				{WalletAddress: userSigner.Address(), SignatureWeight: 1},
+				{WalletAddress: appSigner.Address(), SignatureWeight: 1},
+			},
+			Quorum: 2,
+			Nonce:  1,
+		},
+		Version:     1,
+		SessionData: `{"intent":"user_deposit"}`,
+		Allocations: []app.AppAllocationV1{
+			{Participant: userSigner.Address(), Asset: "yusd", Amount: decimal.RequireFromString("1")},
+			{Participant: appSigner.Address(), Asset: "yusd", Amount: decimal.Zero},
+		},
+	}
+	service, appStore := newWalletStoreServiceForTest(t, userSigner, appSigner, &currentSession)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	service.now = func() time.Time { return now }
+	if err := appStore.UpsertWalletSession(context.Background(), store.WalletStoreSession{
+		WalletAddress:  userSigner.Address(),
+		Asset:          "yusd",
+		AppSessionID:   currentSession.AppSessionID,
+		Status:         "open",
+		Version:        currentSession.Version,
+		UserAllocation: "1",
+		AppAllocation:  "0",
+		SessionData:    currentSession.SessionData,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}); err != nil {
+		t.Fatalf("UpsertWalletSession() error = %v", err)
+	}
+
+	update := app.AppStateUpdateV1{
+		AppSessionID: currentSession.AppSessionID,
+		Intent:       app.AppStateUpdateIntentWithdraw,
+		Version:      2,
+		Allocations: []app.AppAllocationV1{
+			{Participant: userSigner.Address(), Asset: "yusd", Amount: decimal.RequireFromString("0.1000001")},
+			{Participant: appSigner.Address(), Asset: "yusd", Amount: decimal.Zero},
+		},
+		SessionData: `{"intent":"user_withdraw","amount":"0.8999999"}`,
+	}
+	userSig, err := signAppStateUpdate(update, userSigner)
+	if err != nil {
+		t.Fatalf("signAppStateUpdate() error = %v", err)
+	}
+	rpcUpdate := rpc.AppStateUpdateV1{
+		AppSessionID: update.AppSessionID,
+		Intent:       update.Intent,
+		Version:      "2",
+		Allocations: []rpc.AppAllocationV1{
+			{Participant: userSigner.Address(), Asset: "yusd", Amount: "0.1000001"},
+			{Participant: appSigner.Address(), Asset: "yusd", Amount: "0"},
+		},
+		SessionData: update.SessionData,
+	}
+
+	service.submitAppStateRPC = func(context.Context, string, rpc.AppSessionsV1SubmitAppStateRequest) error {
+		t.Fatal("submitAppStateRPC must not be called for over-precision amounts")
+		return nil
+	}
+
+	_, err = service.SubmitUpdate(context.Background(), StoreUpdateRequest{
+		Asset:          "yusd",
+		AppStateUpdate: &rpcUpdate,
+		UserSignature:  userSig,
+	})
+	if err == nil {
+		t.Fatal("SubmitUpdate() accepted over-precision yusd amount")
+	}
+	var validation ValidationError
+	if !errors.As(err, &validation) || !strings.Contains(validation.Error(), "YUSD supports up to 6 decimals") {
+		t.Fatalf("SubmitUpdate() error = %#v, want yusd precision validation", err)
+	}
+}
+
+func TestWalletStoreServiceSubmitWithdrawAcceptsYellowEighteenDecimals(t *testing.T) {
+	t.Parallel()
+
+	userSigner := mustTestSigner(t)
+	appSigner := mustStoreAppSigner(t)
+	currentSession := app.AppSessionInfoV1{
+		AppSessionID: "0xsession",
+		AppDefinition: app.AppDefinitionV1{
+			ApplicationID: "store",
+			Participants: []app.AppParticipantV1{
+				{WalletAddress: userSigner.Address(), SignatureWeight: 1},
+				{WalletAddress: appSigner.Address(), SignatureWeight: 1},
+			},
+			Quorum: 2,
+			Nonce:  1,
+		},
+		Version:     1,
+		SessionData: `{"intent":"user_deposit"}`,
+		Allocations: []app.AppAllocationV1{
+			{Participant: userSigner.Address(), Asset: "yellow", Amount: decimal.RequireFromString("1")},
+			{Participant: appSigner.Address(), Asset: "yellow", Amount: decimal.Zero},
+		},
+	}
+	service, appStore := newWalletStoreServiceForTest(t, userSigner, appSigner, &currentSession)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	service.now = func() time.Time { return now }
+	if err := appStore.UpsertWalletSession(context.Background(), store.WalletStoreSession{
+		WalletAddress:  userSigner.Address(),
+		Asset:          "yellow",
+		AppSessionID:   currentSession.AppSessionID,
+		Status:         "open",
+		Version:        currentSession.Version,
+		UserAllocation: "1",
+		AppAllocation:  "0",
+		SessionData:    currentSession.SessionData,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}); err != nil {
+		t.Fatalf("UpsertWalletSession() error = %v", err)
+	}
+
+	update := app.AppStateUpdateV1{
+		AppSessionID: currentSession.AppSessionID,
+		Intent:       app.AppStateUpdateIntentWithdraw,
+		Version:      2,
+		Allocations: []app.AppAllocationV1{
+			{Participant: userSigner.Address(), Asset: "yellow", Amount: decimal.RequireFromString("0.100000000000000001")},
+			{Participant: appSigner.Address(), Asset: "yellow", Amount: decimal.Zero},
+		},
+		SessionData: `{"intent":"user_withdraw","amount":"0.899999999999999999"}`,
+	}
+	userSig, err := signAppStateUpdate(update, userSigner)
+	if err != nil {
+		t.Fatalf("signAppStateUpdate() error = %v", err)
+	}
+	rpcUpdate := rpc.AppStateUpdateV1{
+		AppSessionID: update.AppSessionID,
+		Intent:       update.Intent,
+		Version:      "2",
+		Allocations: []rpc.AppAllocationV1{
+			{Participant: userSigner.Address(), Asset: "yellow", Amount: "0.100000000000000001"},
+			{Participant: appSigner.Address(), Asset: "yellow", Amount: "0"},
+		},
+		SessionData: update.SessionData,
+	}
+
+	var captured rpc.AppSessionsV1SubmitAppStateRequest
+	service.submitAppStateRPC = func(ctx context.Context, wsURL string, req rpc.AppSessionsV1SubmitAppStateRequest) error {
+		captured = req
+		currentSession.Version = update.Version
+		currentSession.SessionData = update.SessionData
+		currentSession.Allocations = update.Allocations
+		return nil
+	}
+
+	if _, err := service.SubmitUpdate(context.Background(), StoreUpdateRequest{
+		Asset:          "yellow",
+		AppStateUpdate: &rpcUpdate,
+		UserSignature:  userSig,
+	}); err != nil {
+		t.Fatalf("SubmitUpdate() error = %v", err)
+	}
+	if got := captured.AppStateUpdate.Allocations[0].Amount; got != "0.100000000000000001" {
+		t.Fatalf("captured wallet amount = %q, want 0.100000000000000001", got)
 	}
 }
 
@@ -835,6 +1143,246 @@ func TestWalletStoreServiceSubmitWithdrawAcceptsIntentOnlySessionData(t *testing
 	}
 	if resp.Bootstrap == nil || resp.Bootstrap.Session.Version != 3 || resp.Bootstrap.Session.UserAllocation != "0.5" {
 		t.Fatalf("unexpected response = %#v", resp)
+	}
+}
+
+func TestWalletStoreServiceSubmitAppStateAcceptsAuthorizedSessionKey(t *testing.T) {
+	t.Parallel()
+
+	userSigner := mustTestSigner(t)
+	sessionKeySigner := mustEnvSigner(t, "0x8b3a350cf5c34c9194ca3a545d7f46d8eeb98c5fe8e4336cca048a0fbb8e4b3f")
+	appSigner := mustStoreAppSigner(t)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	currentSession := app.AppSessionInfoV1{
+		AppSessionID: "0x00000000000000000000000000000000000000000000000000000000000000aa",
+		AppDefinition: app.AppDefinitionV1{
+			ApplicationID: "store",
+			Participants: []app.AppParticipantV1{
+				{WalletAddress: userSigner.Address(), SignatureWeight: 1},
+				{WalletAddress: appSigner.Address(), SignatureWeight: 1},
+			},
+			Quorum: 2,
+			Nonce:  1,
+		},
+		Version:     1,
+		SessionData: `{"intent":"user_deposit"}`,
+		Allocations: []app.AppAllocationV1{
+			{Participant: userSigner.Address(), Asset: "yusd", Amount: decimal.RequireFromString("1")},
+			{Participant: appSigner.Address(), Asset: "yusd", Amount: decimal.Zero},
+		},
+	}
+	client := &testsupport.FakeClient{
+		GetLatestStateFunc: func(_ context.Context, wallet string, asset string, _ bool) (*core.State, error) {
+			return fundedHomeState(wallet, asset, "7"), nil
+		},
+		GetAppSessionsFunc: func(context.Context, *sdk.GetAppSessionsOptions) ([]app.AppSessionInfoV1, core.PaginationMetadata, error) {
+			return []app.AppSessionInfoV1{currentSession}, core.PaginationMetadata{}, nil
+		},
+		GetLastAppKeyStatesFunc: func(_ context.Context, userAddress string, opts *sdk.GetLastKeyStatesOptions) ([]app.AppSessionKeyStateV1, error) {
+			if !strings.EqualFold(userAddress, userSigner.Address()) {
+				t.Fatalf("session key lookup userAddress = %q, want %q", userAddress, userSigner.Address())
+			}
+			if opts == nil || opts.SessionKey == nil || !strings.EqualFold(*opts.SessionKey, sessionKeySigner.Address()) {
+				t.Fatalf("session key lookup opts = %#v, want session key %s", opts, sessionKeySigner.Address())
+			}
+			return []app.AppSessionKeyStateV1{{
+				UserAddress:    userSigner.Address(),
+				SessionKey:     sessionKeySigner.Address(),
+				Version:        1,
+				AppSessionIDs:  []string{currentSession.AppSessionID},
+				ApplicationIDs: []string{},
+				ExpiresAt:      now.Add(time.Hour),
+				UserSig:        "0xusersig",
+			}}, nil
+		},
+	}
+	manager := nitrolite.NewManagerWithClient(client, nitrolite.Health{
+		Connected:     true,
+		Ready:         true,
+		SignerAddress: appSigner.Address(),
+	}, slog.Default())
+	appStore, err := store.New(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = appStore.Close() })
+
+	service := NewWalletStoreService(manager, appStore, appSigner, "Nitrolite App Session Store", "store", map[string]uint64{"yusd": 11155111}, "wss://example.invalid")
+	service.now = func() time.Time { return now }
+	if err := appStore.UpsertWalletSession(context.Background(), store.WalletStoreSession{
+		WalletAddress:  userSigner.Address(),
+		Asset:          "yusd",
+		AppSessionID:   currentSession.AppSessionID,
+		Status:         "open",
+		Version:        currentSession.Version,
+		UserAllocation: "1",
+		AppAllocation:  "0",
+		SessionData:    currentSession.SessionData,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}); err != nil {
+		t.Fatalf("UpsertWalletSession() error = %v", err)
+	}
+
+	update := app.AppStateUpdateV1{
+		AppSessionID: currentSession.AppSessionID,
+		Intent:       app.AppStateUpdateIntentWithdraw,
+		Version:      2,
+		Allocations: []app.AppAllocationV1{
+			{Participant: userSigner.Address(), Asset: "yusd", Amount: decimal.RequireFromString("0.5")},
+			{Participant: appSigner.Address(), Asset: "yusd", Amount: decimal.Zero},
+		},
+		SessionData: `{"intent":"user_withdraw","amount":"0.500000"}`,
+	}
+	userSig, err := signAppStateUpdateWithSessionKey(update, sessionKeySigner)
+	if err != nil {
+		t.Fatalf("signAppStateUpdateWithSessionKey() error = %v", err)
+	}
+	rpcUpdate := rpc.AppStateUpdateV1{
+		AppSessionID: update.AppSessionID,
+		Intent:       update.Intent,
+		Version:      "2",
+		Allocations: []rpc.AppAllocationV1{
+			{Participant: userSigner.Address(), Asset: "yusd", Amount: "0.5"},
+			{Participant: appSigner.Address(), Asset: "yusd", Amount: "0"},
+		},
+		SessionData: update.SessionData,
+	}
+
+	var captured rpc.AppSessionsV1SubmitAppStateRequest
+	service.submitAppStateRPC = func(ctx context.Context, wsURL string, req rpc.AppSessionsV1SubmitAppStateRequest) error {
+		captured = req
+		currentSession.Version = update.Version
+		currentSession.SessionData = update.SessionData
+		currentSession.Allocations = update.Allocations
+		return nil
+	}
+
+	resp, err := service.SubmitUpdate(context.Background(), StoreUpdateRequest{
+		Asset:          "yusd",
+		AppStateUpdate: &rpcUpdate,
+		UserSignature:  userSig,
+	})
+	if err != nil {
+		t.Fatalf("SubmitUpdate() error = %v", err)
+	}
+	if len(captured.QuorumSigs) != 2 || captured.QuorumSigs[0] != userSig || captured.QuorumSigs[1] == "" {
+		t.Fatalf("unexpected quorum signatures = %#v", captured.QuorumSigs)
+	}
+	if resp.Bootstrap == nil || resp.Bootstrap.Session.Version != 2 {
+		t.Fatalf("unexpected response = %#v", resp)
+	}
+}
+
+func TestWalletStoreServiceSubmitAppStateRejectsSessionKeyOutsideSession(t *testing.T) {
+	t.Parallel()
+
+	userSigner := mustTestSigner(t)
+	sessionKeySigner := mustEnvSigner(t, "0x2191ef87e392377ec08e7c08eb105ef5448eced5f4067f7607e1de4cc3bf8ae6")
+	appSigner := mustStoreAppSigner(t)
+	currentSession := app.AppSessionInfoV1{
+		AppSessionID: "0x00000000000000000000000000000000000000000000000000000000000000bb",
+		AppDefinition: app.AppDefinitionV1{
+			ApplicationID: "store",
+			Participants: []app.AppParticipantV1{
+				{WalletAddress: userSigner.Address(), SignatureWeight: 1},
+				{WalletAddress: appSigner.Address(), SignatureWeight: 1},
+			},
+			Quorum: 2,
+			Nonce:  1,
+		},
+		Version: 1,
+		Allocations: []app.AppAllocationV1{
+			{Participant: userSigner.Address(), Asset: "yusd", Amount: decimal.RequireFromString("1")},
+			{Participant: appSigner.Address(), Asset: "yusd", Amount: decimal.Zero},
+		},
+	}
+	client := &testsupport.FakeClient{
+		GetLatestStateFunc: func(_ context.Context, wallet string, asset string, _ bool) (*core.State, error) {
+			return fundedHomeState(wallet, asset, "7"), nil
+		},
+		GetAppSessionsFunc: func(context.Context, *sdk.GetAppSessionsOptions) ([]app.AppSessionInfoV1, core.PaginationMetadata, error) {
+			return []app.AppSessionInfoV1{currentSession}, core.PaginationMetadata{}, nil
+		},
+		GetLastAppKeyStatesFunc: func(context.Context, string, *sdk.GetLastKeyStatesOptions) ([]app.AppSessionKeyStateV1, error) {
+			return []app.AppSessionKeyStateV1{{
+				UserAddress:    userSigner.Address(),
+				SessionKey:     sessionKeySigner.Address(),
+				Version:        1,
+				AppSessionIDs:  []string{"0x00000000000000000000000000000000000000000000000000000000000000cc"},
+				ApplicationIDs: []string{},
+				ExpiresAt:      time.Now().Add(time.Hour),
+				UserSig:        "0xusersig",
+			}}, nil
+		},
+	}
+	manager := nitrolite.NewManagerWithClient(client, nitrolite.Health{
+		Connected:     true,
+		Ready:         true,
+		SignerAddress: appSigner.Address(),
+	}, slog.Default())
+	appStore, err := store.New(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = appStore.Close() })
+
+	service := NewWalletStoreService(manager, appStore, appSigner, "Nitrolite App Session Store", "store", map[string]uint64{"yusd": 11155111}, "wss://example.invalid")
+	if err := appStore.UpsertWalletSession(context.Background(), store.WalletStoreSession{
+		WalletAddress:  userSigner.Address(),
+		Asset:          "yusd",
+		AppSessionID:   currentSession.AppSessionID,
+		Status:         "open",
+		Version:        currentSession.Version,
+		UserAllocation: "1",
+		AppAllocation:  "0",
+		CreatedAt:      time.Now().UTC(),
+		UpdatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("UpsertWalletSession() error = %v", err)
+	}
+
+	update := app.AppStateUpdateV1{
+		AppSessionID: currentSession.AppSessionID,
+		Intent:       app.AppStateUpdateIntentWithdraw,
+		Version:      2,
+		Allocations: []app.AppAllocationV1{
+			{Participant: userSigner.Address(), Asset: "yusd", Amount: decimal.RequireFromString("0.5")},
+			{Participant: appSigner.Address(), Asset: "yusd", Amount: decimal.Zero},
+		},
+		SessionData: `{"intent":"user_withdraw","amount":"0.500000"}`,
+	}
+	userSig, err := signAppStateUpdateWithSessionKey(update, sessionKeySigner)
+	if err != nil {
+		t.Fatalf("signAppStateUpdateWithSessionKey() error = %v", err)
+	}
+	rpcUpdate := rpc.AppStateUpdateV1{
+		AppSessionID: update.AppSessionID,
+		Intent:       update.Intent,
+		Version:      "2",
+		Allocations: []rpc.AppAllocationV1{
+			{Participant: userSigner.Address(), Asset: "yusd", Amount: "0.5"},
+			{Participant: appSigner.Address(), Asset: "yusd", Amount: "0"},
+		},
+		SessionData: update.SessionData,
+	}
+
+	service.submitAppStateRPC = func(context.Context, string, rpc.AppSessionsV1SubmitAppStateRequest) error {
+		t.Fatal("submitAppStateRPC must not be called for unauthorized session key")
+		return nil
+	}
+
+	_, err = service.SubmitUpdate(context.Background(), StoreUpdateRequest{
+		Asset:          "yusd",
+		AppStateUpdate: &rpcUpdate,
+		UserSignature:  userSig,
+	})
+	if err == nil {
+		t.Fatal("SubmitUpdate() accepted session key outside current app session")
+	}
+	var conflict ConflictError
+	if !errors.As(err, &conflict) || conflict.Code() != "invalid_signature" {
+		t.Fatalf("SubmitUpdate() error = %#v, want invalid_signature conflict", err)
 	}
 }
 
@@ -1820,6 +2368,16 @@ func mustSignerFromKey(t *testing.T, privateKey string) appsigning.Signer {
 	return signer
 }
 
+func mustEnvSigner(t *testing.T, privateKey string) appsigning.Signer {
+	t.Helper()
+
+	signer, err := appsigning.NewEnvSigner(privateKey)
+	if err != nil {
+		t.Fatalf("NewEnvSigner() error = %v", err)
+	}
+	return signer
+}
+
 func mustStoreAppSigner(t *testing.T) appsigning.Signer {
 	t.Helper()
 
@@ -1888,4 +2446,24 @@ func signedPurchaseUpdate(t *testing.T, userSigner appsigning.Signer, appSigner 
 		SessionData: update.SessionData,
 	}
 	return update, rpcUpdate, userSig
+}
+
+func signAppStateUpdateWithSessionKey(update app.AppStateUpdateV1, signer appsigning.Signer) (string, error) {
+	payload, err := app.PackAppStateUpdateV1(update)
+	if err != nil {
+		return "", err
+	}
+	msgSigner, err := sign.NewEthereumMsgSignerFromRaw(signer.TxSigner())
+	if err != nil {
+		return "", err
+	}
+	sessionSigner, err := app.NewAppSessionKeySignerV1(msgSigner)
+	if err != nil {
+		return "", err
+	}
+	signature, err := sessionSigner.Sign(payload)
+	if err != nil {
+		return "", err
+	}
+	return signature.String(), nil
 }

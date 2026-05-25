@@ -4,6 +4,7 @@ import { AnimatePresence, motion, type HTMLMotionProps } from 'motion/react'
 import { Activity, AlertTriangle, BookOpen, CheckCircle2, Copy, CreditCard, Library, Loader2, RefreshCw, ShieldCheck, ShoppingBag, Wallet } from 'lucide-react'
 import { clsx, type ClassValue } from 'clsx'
 import {
+  AppSessionKeySignerV1,
   AppSessionWalletSignerV1,
   AppStateUpdateIntent,
   ChannelDefaultSigner,
@@ -12,21 +13,26 @@ import {
   packCreateAppSessionRequestV1,
   withBlockchainRPC,
   type AppDefinitionV1,
+  type AppSessionKeyStateV1,
   type AppStateUpdateV1,
   type StateSigner,
   type TransactionSigner,
 } from '@yellow-org/sdk'
-import { createWalletClient, custom, type Address, type Hex, type WalletClient } from 'viem'
+import { createWalletClient, custom, encodeAbiParameters, keccak256, recoverMessageAddress, toHex, type Address, type Hex, type WalletClient } from 'viem'
 import { sepolia } from 'viem/chains'
+import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { twMerge } from 'tailwind-merge'
 import './App.css'
 
 const DEFAULT_ASSET = 'yusd'
 const DEMO_ASSETS = ['yusd', 'yellow']
+const DEFAULT_ASSET_DECIMALS: Record<string, number> = { yusd: 6, yellow: 18 }
 const STORED_ASSET_KEY = 'nitrolite-store:selected-asset'
+const STORED_SESSION_KEY = 'nitrolite-store:app-session-key:v1'
+const SESSION_KEY_TTL_SECONDS = 24 * 60 * 60
 const DEPOSIT_SUBMIT_TIMEOUT_MS = 45_000
 const MAX_APPROVE_AMOUNT = new Decimal('1e18')
-const DEFAULT_WS_URL = import.meta.env.VITE_CLEARNODE_WS_URL || 'wss://nitronode-stress.yellow.org/v1/ws'
+const DEFAULT_WS_URL = import.meta.env.VITE_CLEARNODE_WS_URL || 'wss://nitronode-sandbox.yellow.org/v1/ws'
 const DEFAULT_BLOCKCHAIN_RPCS: Record<number, string> = {
   11155111: import.meta.env.VITE_BLOCKCHAIN_RPC_11155111 || 'https://ethereum-sepolia-rpc.publicnode.com',
 }
@@ -72,6 +78,23 @@ class BrowserWalletSigner implements StateSigner, TransactionSigner {
       account: this.account,
       chain: sepolia,
     } as Parameters<WalletClient['sendTransaction']>[0])
+  }
+}
+
+class LocalSessionKeySigner implements StateSigner {
+  private readonly account: ReturnType<typeof privateKeyToAccount>
+
+  constructor(privateKey: Hex) {
+    this.account = privateKeyToAccount(privateKey)
+  }
+
+  getAddress(): Address {
+    return this.account.address
+  }
+
+  async signMessage(message: Hex | { raw: Hex }): Promise<Hex> {
+    const raw = typeof message === 'string' ? message : message.raw
+    return this.account.signMessage({ message: { raw } })
   }
 }
 
@@ -152,6 +175,7 @@ type StoreBootstrap = {
   selected_asset: string
   default_asset: string
   supported_assets: string[]
+  asset_decimals: Record<string, number>
   available_balance: string
   channel_readiness: StoreChannelReadiness
   catalog: StoreCatalogItem[]
@@ -170,6 +194,20 @@ type StoreUpdateResponse = {
   app_signature?: Hex
   pending_action?: StorePendingAction
   bootstrap?: StoreBootstrap
+}
+
+type StoreSessionKey = {
+  wallet: string
+  privateKey: Hex
+  address: Address
+  expiresAt: string
+  version: string
+  appSessionIds: string[]
+  active: boolean
+}
+
+type StoreSessionKeyState = AppSessionKeyStateV1 & {
+  session_key_sig: Hex
 }
 
 type APIError = {
@@ -207,6 +245,101 @@ function persistAsset(asset: string) {
     window.localStorage.setItem(STORED_ASSET_KEY, asset)
   } catch {
     // Local storage is best-effort; wallet recovery still works without it.
+  }
+}
+
+function normalizeAddress(value: string): string {
+  return value.toLowerCase()
+}
+
+function loadStoredSessionKey(wallet?: string | null): StoreSessionKey | null {
+  try {
+    const raw = window.localStorage.getItem(STORED_SESSION_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<StoreSessionKey>
+    if (
+      typeof parsed.wallet !== 'string'
+      || typeof parsed.privateKey !== 'string'
+      || typeof parsed.address !== 'string'
+      || typeof parsed.expiresAt !== 'string'
+      || typeof parsed.version !== 'string'
+      || !Array.isArray(parsed.appSessionIds)
+      || !parsed.active
+    ) {
+      return null
+    }
+    if (wallet && normalizeAddress(parsed.wallet) !== normalizeAddress(wallet)) return null
+    if (Number(parsed.expiresAt) <= Math.floor(Date.now() / 1000)) return null
+    return {
+      wallet: parsed.wallet,
+      privateKey: parsed.privateKey as Hex,
+      address: parsed.address as Address,
+      expiresAt: parsed.expiresAt,
+      version: parsed.version,
+      appSessionIds: parsed.appSessionIds.filter((entry): entry is string => typeof entry === 'string'),
+      active: true,
+    }
+  } catch {
+    return null
+  }
+}
+
+function persistSessionKey(state: StoreSessionKey) {
+  try {
+    window.localStorage.setItem(STORED_SESSION_KEY, JSON.stringify(state))
+  } catch {
+    // Session keys are optional; wallet signing remains available.
+  }
+}
+
+function clearStoredSessionKey() {
+  try {
+    window.localStorage.removeItem(STORED_SESSION_KEY)
+  } catch {
+    // Nothing else to do if browser storage is unavailable.
+  }
+}
+
+function pickLatestSessionKeyState(states: AppSessionKeyStateV1[]): AppSessionKeyStateV1 | null {
+  return states.reduce<AppSessionKeyStateV1 | null>((latest, state) => {
+    if (!latest) return state
+    return Number(state.version) > Number(latest.version) ? state : latest
+  }, null)
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values.filter(Boolean)))
+}
+
+function packCurrentAppSessionKeyState(state: AppSessionKeyStateV1): Hex {
+  const packed = encodeAbiParameters(
+    [
+      { type: 'address' },
+      { type: 'address' },
+      { type: 'uint64' },
+      { type: 'bytes32[]' },
+      { type: 'bytes32[]' },
+      { type: 'uint64' },
+    ],
+    [
+      state.user_address as Address,
+      state.session_key as Address,
+      BigInt(state.version),
+      state.application_ids.map((id) => keccak256(toHex(id))),
+      state.app_session_ids.map((id) => keccak256(toHex(id))),
+      BigInt(state.expires_at),
+    ],
+  )
+  return keccak256(packed)
+}
+
+async function assertSignatureOwner(label: string, packed: Hex, signature: Hex, expected: string) {
+  const recovered = await recoverMessageAddress({
+    message: { raw: packed },
+    signature,
+  })
+  if (normalizeAddress(recovered) !== normalizeAddress(expected)) {
+    throw new Error(`${label} signed as ${shortAddress(recovered)}, but this store session is connected as ${shortAddress(expected)}. Reconnect the wallet and try again.`)
   }
 }
 
@@ -268,6 +401,27 @@ function isPositiveAmount(value: string): boolean {
   return parseDecimal(value)?.greaterThan(0) ?? false
 }
 
+function assetDecimalsFor(asset: string, bootstrap?: StoreBootstrap | null): number {
+  const normalized = asset.toLowerCase()
+  const fromBootstrap = bootstrap?.asset_decimals?.[normalized]
+  if (typeof fromBootstrap === 'number' && Number.isInteger(fromBootstrap) && fromBootstrap >= 0) return fromBootstrap
+  return DEFAULT_ASSET_DECIMALS[normalized] ?? 18
+}
+
+function assetPrecisionError(amount: Decimal | null, asset: string, bootstrap?: StoreBootstrap | null): string | null {
+  if (!amount) return null
+  const decimals = assetDecimalsFor(asset, bootstrap)
+  return amount.decimalPlaces() > decimals ? `${asset.toUpperCase()} supports up to ${decimals} decimals.` : null
+}
+
+function assetAmountToWireString(amount: Decimal, asset: string, bootstrap?: StoreBootstrap | null): string {
+  const decimals = assetDecimalsFor(asset, bootstrap)
+  if (amount.decimalPlaces() > decimals) {
+    throw new Error(`${asset.toUpperCase()} supports up to ${decimals} decimals.`)
+  }
+  return amount.toFixed(decimals)
+}
+
 function minDecimal(a: Decimal, b: Decimal): Decimal {
   return a.lessThan(b) ? a : b
 }
@@ -288,7 +442,7 @@ function parseSessionDataLabel(sessionData?: string): string {
       case 'user_deposit':
         return 'Last action: deposit signed.'
       case 'purchase':
-        return `Last action: purchased ${parsed.item_id} for ${parsed.item_price}`
+        return `Last action: purchased ${parsed.item_id} for ${formatAmount(parsed.item_price ?? '0')}`
       case 'user_withdraw':
         return 'Last action: withdrew from store.'
       default:
@@ -363,7 +517,7 @@ function toRPCDefinition(definition: AppDefinitionV1) {
   }
 }
 
-function toRPCAppStateUpdate(update: AppStateUpdateV1) {
+function toRPCAppStateUpdate(update: AppStateUpdateV1, bootstrap: StoreBootstrap) {
   return {
     app_session_id: update.appSessionId,
     intent: update.intent,
@@ -371,7 +525,7 @@ function toRPCAppStateUpdate(update: AppStateUpdateV1) {
     allocations: update.allocations.map((allocation) => ({
       participant: allocation.participant,
       asset: allocation.asset,
-      amount: allocation.amount.toString(),
+      amount: assetAmountToWireString(allocation.amount, allocation.asset, bootstrap),
     })),
     session_data: update.sessionData,
   }
@@ -428,7 +582,7 @@ function ActionButton({ children, className, variant = 'primary', icon, ...props
       transition={{ type: 'spring', stiffness: 420, damping: 20 }}
       className={cn(
         'inline-flex min-h-11 items-center justify-center gap-2 rounded-md px-4 text-sm font-black transition disabled:cursor-not-allowed disabled:opacity-50',
-        variant === 'primary' && 'shimmer-button bg-ink text-yellow-brand shadow-glow',
+        variant === 'primary' && (props.disabled ? 'border border-black/10 bg-black/20 text-black/45 shadow-none' : 'shimmer-button bg-ink text-yellow-brand shadow-glow'),
         variant === 'secondary' && 'border border-black/10 bg-white text-ink shadow-sm hover:border-black/30',
         variant === 'ghost' && 'bg-transparent text-ink hover:bg-black/5',
         className,
@@ -481,6 +635,7 @@ export default function App() {
   const [depositAmount, setDepositAmount] = useState('1.00')
   const [withdrawAmount, setWithdrawAmount] = useState('0.50')
   const [readerItem, setReaderItem] = useState<ContentResponse | null>(null)
+  const [sessionKey, setSessionKey] = useState<StoreSessionKey | null>(() => loadStoredSessionKey())
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [activity, setActivity] = useState<string[]>([])
@@ -515,14 +670,33 @@ export default function App() {
     channelReadiness?.status === 'ack_required' && channelReadiness.pending_transition === 'release' && pendingChannelAmount.greaterThan(0),
   )
   const depositValue = useMemo(() => parseDecimal(depositAmount), [depositAmount])
+  const depositPrecisionError = useMemo(
+    () => assetPrecisionError(depositValue, selectedAsset, bootstrap),
+    [bootstrap, depositValue, selectedAsset],
+  )
   const pendingDepositValue = useMemo(() => (pendingDeposit ? parseDecimal(pendingDeposit.amount) : null), [pendingDeposit])
   const depositExceedsAvailable = Boolean(bootstrap && depositValue?.greaterThan(0) && depositValue.greaterThan(availableBalance))
+  const depositValidationMessage = depositPrecisionError
+    ?? (depositExceedsAvailable ? `Deposit amount exceeds your available ${selectedAsset.toUpperCase()} channel funds.` : null)
+  const withdrawValue = useMemo(() => parseDecimal(withdrawAmount), [withdrawAmount])
+  const withdrawPrecisionError = useMemo(
+    () => assetPrecisionError(withdrawValue, selectedAsset, bootstrap),
+    [bootstrap, selectedAsset, withdrawValue],
+  )
   const pendingDepositExceedsAvailable = Boolean(bootstrap && pendingDepositValue?.greaterThan(0) && pendingDepositValue.greaterThan(availableBalance))
+  const activeSessionKey = useMemo(() => {
+    if (!walletAddress || !bootstrap?.session.app_session_id || !sessionKey?.active) return null
+    if (normalizeAddress(sessionKey.wallet) !== normalizeAddress(walletAddress)) return null
+    if (!sessionKey.appSessionIds.some((id) => id.toLowerCase() === bootstrap.session.app_session_id?.toLowerCase())) return null
+    if (Number(sessionKey.expiresAt) <= Math.floor(Date.now() / 1000)) return null
+    return sessionKey
+  }, [bootstrap?.session.app_session_id, sessionKey, walletAddress])
   const canPrepareChannel = Boolean(walletAddress && nitroliteClient && bootstrap && busy === null && canRunChannelSetup)
-  const canDeposit = Boolean(walletAddress && sessionReady && channelReady && busy === null && isPositiveAmount(depositAmount) && !depositExceedsAvailable)
-  const canWithdraw = Boolean(walletAddress && sessionReady && channelReady && busy === null && isPositiveAmount(withdrawAmount))
+  const canDeposit = Boolean(walletAddress && sessionReady && channelReady && busy === null && isPositiveAmount(depositAmount) && !depositPrecisionError && !depositExceedsAvailable)
+  const canWithdraw = Boolean(walletAddress && sessionReady && channelReady && busy === null && isPositiveAmount(withdrawAmount) && !withdrawPrecisionError)
   const canResumeDeposit = Boolean(walletAddress && nitroliteClient && pendingDeposit && busy === null && !pendingDepositExceedsAvailable)
   const canCreateSession = Boolean(sessionNeedsStart && walletAddress && walletClient && busy === null && channelReady)
+  const canManageSessionKey = Boolean(walletAddress && nitroliteClient && sessionReady && busy === null)
 
   function appendLog(line: string) {
     const stamped = `${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} ${line}`
@@ -549,6 +723,7 @@ export default function App() {
     setWalletAddress(wallet)
     setWalletClient(client)
     setNitroliteClient(nitrolite)
+    setSessionKey(loadStoredSessionKey(wallet))
     appendLog(`${label} ${shortAddress(wallet)}`)
     await refreshBootstrap(asset, wallet)
   }
@@ -586,6 +761,7 @@ export default function App() {
         setWalletAddress(null)
         setWalletClient(null)
         setNitroliteClient(null)
+        setSessionKey(null)
         setBootstrap(null)
         setReaderItem(null)
         appendLog('wallet disconnected')
@@ -698,6 +874,111 @@ export default function App() {
     }
   }
 
+  async function signSessionKeyStateWithLocalKey(state: AppSessionKeyStateV1, privateKey: Hex): Promise<StoreSessionKeyState> {
+    if (!nitroliteClient) throw new Error('Connect a wallet before managing quick approvals.')
+    if (!walletClient) throw new Error('Connect a wallet before managing quick approvals.')
+    const activeWallet = (await walletClient?.getAddresses().catch(() => []))?.[0]
+    if (activeWallet && normalizeAddress(activeWallet) !== normalizeAddress(state.user_address)) {
+      throw new Error(`MetaMask is currently on ${shortAddress(activeWallet)}, but this store session is connected as ${shortAddress(state.user_address)}. Reconnect the wallet and try again.`)
+    }
+    const packed = packCurrentAppSessionKeyState(state)
+    const sessionKeySig = await new LocalSessionKeySigner(privateKey).signMessage(packed)
+    const userSig = await walletClient.signMessage({
+      account: state.user_address as Address,
+      message: { raw: packed },
+    })
+    await assertSignatureOwner('MetaMask', packed, userSig, state.user_address)
+    await assertSignatureOwner('Session key', packed, sessionKeySig, state.session_key)
+    return {
+      ...state,
+      user_sig: userSig,
+      session_key_sig: sessionKeySig,
+    }
+  }
+
+  async function enableSessionKey() {
+    if (!walletAddress || !nitroliteClient || !bootstrap?.session.app_session_id) return
+
+    setBusy('session-key')
+    setError(null)
+    try {
+      const existing = sessionKey && normalizeAddress(sessionKey.wallet) === normalizeAddress(walletAddress) ? sessionKey : null
+      const privateKey = existing?.privateKey ?? generatePrivateKey()
+      const account = privateKeyToAccount(privateKey)
+      const existingStates = await nitroliteClient.getLastKeyStates(walletAddress, account.address)
+      const latest = pickLatestSessionKeyState(existingStates)
+      const appSessionIds = uniqueStrings([...(latest?.app_session_ids ?? []), bootstrap.session.app_session_id])
+      const expiresAt = String(Math.floor(Date.now() / 1000) + SESSION_KEY_TTL_SECONDS)
+      const nextState: AppSessionKeyStateV1 = {
+        user_address: walletAddress,
+        session_key: account.address,
+        version: String((latest ? Number(latest.version) : 0) + 1),
+        application_ids: latest?.application_ids ?? [],
+        app_session_ids: appSessionIds,
+        expires_at: expiresAt,
+        user_sig: '',
+      }
+      const signedState = await signSessionKeyStateWithLocalKey(nextState, privateKey)
+      await nitroliteClient.submitSessionKeyState(signedState)
+
+      const saved: StoreSessionKey = {
+        wallet: walletAddress,
+        privateKey,
+        address: account.address,
+        expiresAt,
+        version: nextState.version,
+        appSessionIds,
+        active: true,
+      }
+      persistSessionKey(saved)
+      setSessionKey(saved)
+      appendLog(`quick approvals enabled ${shortAddress(account.address)}`)
+    } catch (sessionKeyError) {
+      setError(sessionKeyError instanceof Error ? sessionKeyError.message : 'Failed to enable quick approvals')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function disableSessionKey() {
+    if (!walletAddress || !nitroliteClient || !sessionKey) return
+
+    setBusy('session-key')
+    setError(null)
+    try {
+      const states = await nitroliteClient.getLastKeyStates(walletAddress, sessionKey.address)
+      const latest = pickLatestSessionKeyState(states)
+      const nextState: AppSessionKeyStateV1 = {
+        user_address: walletAddress,
+        session_key: sessionKey.address,
+        version: String((latest ? Number(latest.version) : Number(sessionKey.version)) + 1),
+        application_ids: [],
+        app_session_ids: [],
+        expires_at: String(Math.floor(Date.now() / 1000) + 60),
+        user_sig: '',
+      }
+      const signedState = await signSessionKeyStateWithLocalKey(nextState, sessionKey.privateKey)
+      await nitroliteClient.submitSessionKeyState(signedState)
+      clearStoredSessionKey()
+      setSessionKey(null)
+      appendLog(`quick approvals disabled`)
+    } catch (sessionKeyError) {
+      setError(sessionKeyError instanceof Error ? sessionKeyError.message : 'Failed to disable quick approvals')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function signAppStateUpdate(appStateUpdate: AppStateUpdateV1): Promise<Hex> {
+    const payload = packAppStateUpdateV1(appStateUpdate)
+    if (activeSessionKey) {
+      const signer = new AppSessionKeySignerV1(new LocalSessionKeySigner(activeSessionKey.privateKey))
+      return signer.signMessage(payload)
+    }
+    if (!walletClient || !walletAddress) throw new Error('Connect a wallet before signing.')
+    return new AppSessionWalletSignerV1(new BrowserWalletSigner(walletClient, walletAddress as Address)).signMessage(payload)
+  }
+
   async function checkpointWithApproval(asset: string): Promise<string | null> {
     if (!nitroliteClient || !walletAddress || !bootstrap) throw new Error('Connect a wallet before preparing a channel.')
     try {
@@ -786,11 +1067,12 @@ export default function App() {
       if (nextUser.isNegative()) {
         throw new Error('Add funds before purchasing this item.')
       }
+      const itemPrice = assetAmountToWireString(price, bootstrap.selected_asset, bootstrap)
 
       const sessionData = JSON.stringify({
         intent: 'purchase',
         item_id: Number.isFinite(Number(item.id)) ? Number(item.id) : item.id,
-        item_price: price.toFixed(),
+        item_price: itemPrice,
       })
       const appStateUpdate: AppStateUpdateV1 = {
         appSessionId: bootstrap.session.app_session_id!,
@@ -803,14 +1085,13 @@ export default function App() {
         sessionData,
       }
 
-      const payload = packAppStateUpdateV1(appStateUpdate)
-      const userSignature = await new AppSessionWalletSignerV1(new BrowserWalletSigner(walletClient, walletAddress as Address)).signMessage(payload)
+      const userSignature = await signAppStateUpdate(appStateUpdate)
 
       const result = await readJSON<StoreUpdateResponse>('/api/store/update', {
         method: 'POST',
         body: JSON.stringify({
           asset: bootstrap.selected_asset,
-          app_state_update: toRPCAppStateUpdate(appStateUpdate),
+          app_state_update: toRPCAppStateUpdate(appStateUpdate, bootstrap),
           user_signature: userSignature,
         }),
       })
@@ -845,8 +1126,9 @@ export default function App() {
       if (nextUser.isNegative()) {
         throw new Error('Withdraw amount exceeds your store balance.')
       }
+      const wireAmount = assetAmountToWireString(amount, bootstrap.selected_asset, bootstrap)
 
-      const sessionData = JSON.stringify({ intent: 'user_withdraw' })
+      const sessionData = JSON.stringify({ intent: 'user_withdraw', amount: wireAmount })
       const appStateUpdate: AppStateUpdateV1 = {
         appSessionId: bootstrap.session.app_session_id!,
         intent: AppStateUpdateIntent.Withdraw,
@@ -858,14 +1140,13 @@ export default function App() {
         sessionData,
       }
 
-      const payload = packAppStateUpdateV1(appStateUpdate)
-      const userSignature = await new AppSessionWalletSignerV1(new BrowserWalletSigner(walletClient, walletAddress as Address)).signMessage(payload)
+      const userSignature = await signAppStateUpdate(appStateUpdate)
 
       const result = await readJSON<StoreUpdateResponse>('/api/store/update', {
         method: 'POST',
         body: JSON.stringify({
           asset: bootstrap.selected_asset,
-          app_state_update: toRPCAppStateUpdate(appStateUpdate),
+          app_state_update: toRPCAppStateUpdate(appStateUpdate, bootstrap),
           user_signature: userSignature,
         }),
       })
@@ -962,8 +1243,9 @@ export default function App() {
       const currentUser = new Decimal(bootstrap.session.user_allocation)
       const currentApp = new Decimal(bootstrap.session.app_allocation)
       const nextUser = currentUser.plus(amount)
+      const wireAmount = assetAmountToWireString(amount, bootstrap.selected_asset, bootstrap)
 
-      const sessionData = JSON.stringify({ intent: 'user_deposit', amount: amount.toFixed() })
+      const sessionData = JSON.stringify({ intent: 'user_deposit', amount: wireAmount })
       const appStateUpdate: AppStateUpdateV1 = {
         appSessionId: bootstrap.session.app_session_id!,
         intent: AppStateUpdateIntent.Deposit,
@@ -975,14 +1257,13 @@ export default function App() {
         sessionData,
       }
 
-      const payload = packAppStateUpdateV1(appStateUpdate)
-      const userSignature = await new AppSessionWalletSignerV1(new BrowserWalletSigner(walletClient, walletAddress as Address)).signMessage(payload)
+      const userSignature = await signAppStateUpdate(appStateUpdate)
 
       const result = await readJSON<StoreUpdateResponse>('/api/store/update', {
         method: 'POST',
         body: JSON.stringify({
           asset: bootstrap.selected_asset,
-          app_state_update: toRPCAppStateUpdate(appStateUpdate),
+          app_state_update: toRPCAppStateUpdate(appStateUpdate, bootstrap),
           user_signature: userSignature,
         }),
       })
@@ -1221,6 +1502,31 @@ export default function App() {
             {bootstrap ? parseSessionDataLabel(bootstrap.session.session_data) : 'Connect wallet to load the store.'}
           </p>
 
+          {sessionReady ? (
+            <div className="mt-4 flex flex-col gap-3 rounded-lg border border-black/10 bg-white/90 p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0">
+                <p className="flex items-center gap-2 text-sm font-black uppercase tracking-normal text-ink">
+                  <ShieldCheck className="size-4 shrink-0" />
+                  Quick approvals
+                </p>
+                <p className="mt-1 text-sm font-semibold leading-5 text-black/60">
+                  {activeSessionKey
+                    ? `Using local session key ${shortAddress(activeSessionKey.address)} for store updates.`
+                    : 'Optional local session key for purchases, deposits, and withdrawals in this store session.'}
+                </p>
+              </div>
+              <ActionButton
+                className="shrink-0"
+                variant={activeSessionKey ? 'secondary' : 'primary'}
+                disabled={!canManageSessionKey}
+                onClick={activeSessionKey ? disableSessionKey : enableSessionKey}
+                icon={busy === 'session-key' ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}
+              >
+                {busy === 'session-key' ? 'Updating' : activeSessionKey ? 'Disable' : 'Enable'}
+              </ActionButton>
+            </div>
+          ) : null}
+
           {sessionNeedsStart && channelReady ? (
             <div className="mt-4 flex flex-col gap-3 rounded-lg border border-black/10 bg-white/90 p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
               <p className="text-sm font-semibold leading-5 text-black/60">
@@ -1269,64 +1575,69 @@ export default function App() {
           {sessionReady && !channelReady ? renderChannelSetupPanel() : null}
 
           {sessionReady && channelReady ? (
-            <div className="mt-5 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
-              <label className="grid gap-2 text-sm font-black text-ink">
-                Deposit
-                <input
-                  id="deposit-amount"
-                  name="deposit_amount"
-                  className="min-h-11 rounded-md border border-black/10 bg-white px-3 text-base font-bold text-ink shadow-sm"
-                  value={depositAmount}
-                  onChange={(event) => setDepositAmount(event.target.value)}
-                  type="number"
-                  inputMode="decimal"
-                  min="0.000001"
-                  step="0.01"
-                  required
-                  aria-label={`Deposit amount in ${selectedAsset.toUpperCase()}`}
-                />
-                {depositExceedsAvailable ? (
-                  <span className="text-xs font-bold leading-5 text-red-700">
-                    {`Deposit amount exceeds your available ${selectedAsset.toUpperCase()} channel funds.`}
-                  </span>
-                ) : pendingDeposit ? (
-                  <span className="text-xs font-bold leading-5 text-black/50">A new deposit replaces the pending checkpoint.</span>
-                ) : null}
-              </label>
-              <ActionButton
-                className="self-end"
-                disabled={!canDeposit}
-                onClick={submitDeposit}
-                icon={busy === 'deposit' ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
-              >
-                {busy === 'deposit' ? 'Depositing' : 'Deposit'}
-              </ActionButton>
+            <div className="mt-5 grid gap-4">
+              <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+                <label className="grid gap-2 text-sm font-black text-ink">
+                  Deposit
+                  <input
+                    id="deposit-amount"
+                    name="deposit_amount"
+                    className="min-h-11 rounded-md border border-black/10 bg-white px-3 text-base font-bold text-ink shadow-sm"
+                    value={depositAmount}
+                    onChange={(event) => setDepositAmount(event.target.value)}
+                    type="number"
+                    inputMode="decimal"
+                    min="0.000001"
+                    step="0.01"
+                    required
+                    aria-label={`Deposit amount in ${selectedAsset.toUpperCase()}`}
+                    aria-describedby="deposit-help"
+                  />
+                </label>
+                <p id="deposit-help" className={cn('min-h-5 text-xs font-bold leading-5 sm:col-start-1 sm:row-start-2', depositValidationMessage ? 'text-red-700' : 'text-black/50')}>
+                  {depositValidationMessage ?? (pendingDeposit ? 'A new deposit replaces the pending checkpoint.' : '')}
+                </p>
+                <ActionButton
+                  className="sm:col-start-2 sm:row-start-1 sm:mt-7 sm:min-w-[9rem]"
+                  disabled={!canDeposit}
+                  onClick={submitDeposit}
+                  icon={busy === 'deposit' ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+                >
+                  {busy === 'deposit' ? 'Depositing' : 'Deposit'}
+                </ActionButton>
+              </div>
 
-              <label className="grid gap-2 text-sm font-black text-ink">
-                Withdraw
-                <input
-                  id="withdraw-amount"
-                  name="withdraw_amount"
-                  className="min-h-11 rounded-md border border-black/10 bg-white px-3 text-base font-bold text-ink shadow-sm"
-                  value={withdrawAmount}
-                  onChange={(event) => setWithdrawAmount(event.target.value)}
-                  type="number"
-                  inputMode="decimal"
-                  min="0.000001"
-                  step="0.01"
-                  required
-                  aria-label={`Withdraw amount in ${selectedAsset.toUpperCase()}`}
-                />
-              </label>
-              <ActionButton
-                className="self-end"
-                variant="secondary"
-                disabled={!canWithdraw}
-                onClick={submitWithdraw}
-                icon={busy === 'withdraw' ? <Loader2 className="size-4 animate-spin" /> : <CreditCard className="size-4" />}
-              >
-                {busy === 'withdraw' ? 'Withdrawing' : 'Withdraw'}
-              </ActionButton>
+              <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+                <label className="grid gap-2 text-sm font-black text-ink">
+                  Withdraw
+                  <input
+                    id="withdraw-amount"
+                    name="withdraw_amount"
+                    className="min-h-11 rounded-md border border-black/10 bg-white px-3 text-base font-bold text-ink shadow-sm"
+                    value={withdrawAmount}
+                    onChange={(event) => setWithdrawAmount(event.target.value)}
+                    type="number"
+                    inputMode="decimal"
+                    min="0.000001"
+                    step="0.01"
+                    required
+                    aria-label={`Withdraw amount in ${selectedAsset.toUpperCase()}`}
+                    aria-describedby="withdraw-help"
+                  />
+                </label>
+                <p id="withdraw-help" className="min-h-5 text-xs font-bold leading-5 text-red-700 sm:col-start-1 sm:row-start-2">
+                  {withdrawPrecisionError ?? ''}
+                </p>
+                <ActionButton
+                  className="sm:col-start-2 sm:row-start-1 sm:mt-7 sm:min-w-[9rem]"
+                  variant="secondary"
+                  disabled={!canWithdraw}
+                  onClick={submitWithdraw}
+                  icon={busy === 'withdraw' ? <Loader2 className="size-4 animate-spin" /> : <CreditCard className="size-4" />}
+                >
+                  {busy === 'withdraw' ? 'Withdrawing' : 'Withdraw'}
+                </ActionButton>
+              </div>
             </div>
           ) : null}
         </MagicPanel>
