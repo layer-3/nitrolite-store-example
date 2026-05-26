@@ -211,6 +211,15 @@ type StoreSessionKeyState = AppSessionKeyStateV1 & {
   session_key_sig: Hex
 }
 
+type QuickApprovalAction = 'purchase' | 'deposit' | 'withdraw'
+
+type QuickApprovalChoice = 'enable' | 'skip'
+
+type QuickApprovalPromptState = {
+  action: QuickApprovalAction
+  resolve: (choice: QuickApprovalChoice) => void
+}
+
 type APIError = {
   error?: {
     code: string
@@ -296,14 +305,6 @@ function persistSessionKey(state: StoreSessionKey) {
     window.localStorage.setItem(STORED_SESSION_KEY, JSON.stringify(state))
   } catch {
     // Session keys are optional; wallet signing remains available.
-  }
-}
-
-function clearStoredSessionKey() {
-  try {
-    window.localStorage.removeItem(STORED_SESSION_KEY)
-  } catch {
-    // Nothing else to do if browser storage is unavailable.
   }
 }
 
@@ -658,6 +659,8 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [activity, setActivity] = useState<string[]>([])
+  const [quickApprovalPrompt, setQuickApprovalPrompt] = useState<QuickApprovalPromptState | null>(null)
+  const [quickApprovalDeclined, setQuickApprovalDeclined] = useState(false)
 
   const libraryIds = useMemo(() => new Set((bootstrap?.library ?? []).map((item) => item.id)), [bootstrap])
   const assetOptions = useMemo(() => {
@@ -711,7 +714,6 @@ export default function App() {
   const canWithdraw = Boolean(walletAddress && sessionReady && channelReady && busy === null && isPositiveAmount(withdrawAmount) && !withdrawPrecisionError)
   const canResumeDeposit = Boolean(walletAddress && nitroliteClient && pendingDeposit && busy === null && !pendingDepositExceedsAvailable)
   const canCreateSession = Boolean(sessionNeedsStart && walletAddress && walletClient && busy === null && channelReady)
-  const canManageSessionKey = Boolean(walletAddress && walletClient && nitroliteClient && bootstrap && busy === null)
 
   function appendLog(line: string) {
     const stamped = `${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} ${line}`
@@ -732,13 +734,7 @@ export default function App() {
     }
   }
 
-  async function hydrateWallet(
-    provider: InjectedProvider,
-    wallet: string,
-    asset: string,
-    label: string,
-    options: { enableQuickApprovals?: boolean } = {},
-  ) {
+  async function hydrateWallet(provider: InjectedProvider, wallet: string, asset: string, label: string) {
     await ensureSepolia(provider)
     const { client, nitrolite } = await createWalletConnections(provider, wallet)
     const restoredSessionKey = loadStoredSessionKey(wallet)
@@ -747,20 +743,7 @@ export default function App() {
     setNitroliteClient(nitrolite)
     setSessionKey(restoredSessionKey)
     appendLog(`${label} ${shortAddress(wallet)}`)
-    const nextBootstrap = await refreshBootstrap(asset, wallet)
-
-    if (options.enableQuickApprovals && !isUsableSessionKeyForBootstrap(restoredSessionKey, wallet, nextBootstrap)) {
-      try {
-        const nextSessionKey = await enableStoreSessionKey(wallet, client, nitrolite, nextBootstrap, restoredSessionKey)
-        persistSessionKey(nextSessionKey)
-        setSessionKey(nextSessionKey)
-        appendLog(`quick approvals enabled ${shortAddress(nextSessionKey.address)}`)
-      } catch (sessionKeyError) {
-        setError(sessionKeyError instanceof Error
-          ? `Quick approvals were not enabled: ${sessionKeyError.message}`
-          : 'Quick approvals were not enabled.')
-      }
-    }
+    await refreshBootstrap(asset, wallet)
   }
 
   useEffect(() => {
@@ -799,6 +782,7 @@ export default function App() {
         setSessionKey(null)
         setBootstrap(null)
         setReaderItem(null)
+        setQuickApprovalDeclined(false)
         appendLog('wallet disconnected')
         return
       }
@@ -857,7 +841,7 @@ export default function App() {
         throw new Error('MetaMask did not return an account.')
       }
 
-      await hydrateWallet(provider, wallet, selectedAsset, 'wallet connected', { enableQuickApprovals: true })
+      await hydrateWallet(provider, wallet, selectedAsset, 'wallet connected')
     } catch (connectError) {
       setError(connectError instanceof Error ? connectError.message : 'Failed to connect wallet')
     } finally {
@@ -969,57 +953,46 @@ export default function App() {
     }
   }
 
-  async function enableSessionKey() {
-    if (!walletAddress || !walletClient || !nitroliteClient || !bootstrap) return
-
-    setBusy('session-key')
-    setError(null)
-    try {
-      const saved = await enableStoreSessionKey(walletAddress, walletClient, nitroliteClient, bootstrap, sessionKey)
-      persistSessionKey(saved)
-      setSessionKey(saved)
-      appendLog(`quick approvals enabled ${shortAddress(saved.address)}`)
-    } catch (sessionKeyError) {
-      setError(sessionKeyError instanceof Error ? sessionKeyError.message : 'Failed to enable quick approvals')
-    } finally {
-      setBusy(null)
+  function quickApprovalActionLabel(action: QuickApprovalAction) {
+    switch (action) {
+      case 'deposit':
+        return 'store deposits'
+      case 'withdraw':
+        return 'store withdrawals'
+      case 'purchase':
+        return 'purchases'
     }
   }
 
-  async function disableSessionKey() {
-    if (!walletAddress || !nitroliteClient || !sessionKey) return
-
-    setBusy('session-key')
-    setError(null)
-    try {
-      const states = await nitroliteClient.getLastKeyStates(walletAddress, sessionKey.address)
-      const latest = pickLatestSessionKeyState(states)
-      const nextState: AppSessionKeyStateV1 = {
-        user_address: walletAddress,
-        session_key: sessionKey.address,
-        version: String((latest ? Number(latest.version) : Number(sessionKey.version)) + 1),
-        application_ids: [],
-        app_session_ids: [],
-        expires_at: String(Math.floor(Date.now() / 1000) + 60),
-        user_sig: '',
-      }
-      const signedState = await signSessionKeyStateWithLocalKey(nextState, sessionKey.privateKey)
-      await nitroliteClient.submitSessionKeyState(signedState)
-      clearStoredSessionKey()
-      setSessionKey(null)
-      appendLog(`quick approvals disabled`)
-    } catch (sessionKeyError) {
-      setError(sessionKeyError instanceof Error ? sessionKeyError.message : 'Failed to disable quick approvals')
-    } finally {
-      setBusy(null)
-    }
+  function askQuickApproval(action: QuickApprovalAction): Promise<QuickApprovalChoice> {
+    if (quickApprovalDeclined) return Promise.resolve('skip')
+    return new Promise((resolve) => setQuickApprovalPrompt({ action, resolve }))
   }
 
-  async function signAppStateUpdate(appStateUpdate: AppStateUpdateV1): Promise<Hex> {
+  function resolveQuickApprovalPrompt(choice: QuickApprovalChoice) {
+    if (!quickApprovalPrompt) return
+    const { resolve } = quickApprovalPrompt
+    setQuickApprovalPrompt(null)
+    if (choice === 'skip') setQuickApprovalDeclined(true)
+    resolve(choice)
+  }
+
+  async function signAppStateUpdate(appStateUpdate: AppStateUpdateV1, action: QuickApprovalAction): Promise<Hex> {
     const payload = packAppStateUpdateV1(appStateUpdate)
     if (activeSessionKey) {
       const signer = new AppSessionKeySignerV1(new LocalSessionKeySigner(activeSessionKey.privateKey))
       return signer.signMessage(payload)
+    }
+    if (walletClient && walletAddress && nitroliteClient && bootstrap && !quickApprovalDeclined) {
+      const choice = await askQuickApproval(action)
+      if (choice === 'enable') {
+        const saved = await enableStoreSessionKey(walletAddress, walletClient, nitroliteClient, bootstrap, sessionKey)
+        persistSessionKey(saved)
+        setSessionKey(saved)
+        appendLog(`quick approvals enabled ${shortAddress(saved.address)}`)
+        const signer = new AppSessionKeySignerV1(new LocalSessionKeySigner(saved.privateKey))
+        return signer.signMessage(payload)
+      }
     }
     if (!walletClient || !walletAddress) throw new Error('Connect a wallet before signing.')
     return new AppSessionWalletSignerV1(new BrowserWalletSigner(walletClient, walletAddress as Address)).signMessage(payload)
@@ -1131,7 +1104,7 @@ export default function App() {
         sessionData,
       }
 
-      const userSignature = await signAppStateUpdate(appStateUpdate)
+      const userSignature = await signAppStateUpdate(appStateUpdate, 'purchase')
 
       const result = await readJSON<StoreUpdateResponse>('/api/store/update', {
         method: 'POST',
@@ -1186,7 +1159,7 @@ export default function App() {
         sessionData,
       }
 
-      const userSignature = await signAppStateUpdate(appStateUpdate)
+      const userSignature = await signAppStateUpdate(appStateUpdate, 'withdraw')
 
       const result = await readJSON<StoreUpdateResponse>('/api/store/update', {
         method: 'POST',
@@ -1303,7 +1276,7 @@ export default function App() {
         sessionData,
       }
 
-      const userSignature = await signAppStateUpdate(appStateUpdate)
+      const userSignature = await signAppStateUpdate(appStateUpdate, 'deposit')
 
       const result = await readJSON<StoreUpdateResponse>('/api/store/update', {
         method: 'POST',
@@ -1501,6 +1474,39 @@ export default function App() {
         ) : null}
       </AnimatePresence>
 
+      <AnimatePresence>
+        {quickApprovalPrompt ? (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            className="rounded-lg border border-yellow-line bg-yellow-brand/25 p-4 shadow-card"
+            role="dialog"
+            aria-live="polite"
+          >
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0">
+                <p className="flex items-center gap-2 text-sm font-black uppercase tracking-normal text-ink">
+                  <ShieldCheck className="size-4 shrink-0" />
+                  Enable quick approvals?
+                </p>
+                <p className="mt-1 text-sm font-semibold leading-5 text-black/60">
+                  Enable once to make future {quickApprovalActionLabel(quickApprovalPrompt.action)} in this store run without repeated wallet popups.
+                </p>
+              </div>
+              <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
+                <ActionButton variant="secondary" onClick={() => resolveQuickApprovalPrompt('skip')}>
+                  Not now
+                </ActionButton>
+                <ActionButton onClick={() => resolveQuickApprovalPrompt('enable')} icon={<ShieldCheck className="size-4" />}>
+                  Enable
+                </ActionButton>
+              </div>
+            </div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+
       <div className="grid gap-5 lg:grid-cols-[1.05fr_0.95fr]">
         <MagicPanel>
           <PanelHeader label="Session" title={bootstrap?.store_name ?? 'Store'} icon={<CreditCard className="size-5" />} />
@@ -1523,7 +1529,7 @@ export default function App() {
 
           <div className="grid gap-3 sm:grid-cols-3">
             <div className="metric-card">
-              <p className="label-text">Available</p>
+              <p className="label-text">Yellow Network</p>
               <NumberTicker value={bootstrap?.available_balance ?? '0'} />
               <p className="mt-1 text-xs font-bold uppercase text-black/50">{selectedAsset}</p>
               {hasPendingChannelBalance ? (
@@ -1533,7 +1539,7 @@ export default function App() {
               ) : null}
             </div>
             <div className="metric-card">
-              <p className="label-text">Store balance</p>
+              <p className="label-text">In-store balance</p>
               <NumberTicker value={bootstrap?.session.user_allocation ?? '0'} />
               <p className="mt-1 text-xs font-bold uppercase text-black/50">{selectedAsset}</p>
             </div>
@@ -1547,31 +1553,6 @@ export default function App() {
           <p className="mt-4 rounded-lg border border-black/10 bg-yellow-surface/70 px-3 py-2 text-sm font-semibold text-black/70" aria-live="polite">
             {bootstrap ? parseSessionDataLabel(bootstrap.session.session_data) : 'Connect wallet to load the store.'}
           </p>
-
-          {walletAddress && bootstrap ? (
-            <div className="mt-4 flex flex-col gap-3 rounded-lg border border-black/10 bg-white/90 p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
-              <div className="min-w-0">
-                <p className="flex items-center gap-2 text-sm font-black uppercase tracking-normal text-ink">
-                  <ShieldCheck className="size-4 shrink-0" />
-                  Quick approvals
-                </p>
-                <p className="mt-1 text-sm font-semibold leading-5 text-black/60">
-                  {activeSessionKey
-                    ? `Using local session key ${shortAddress(activeSessionKey.address)} for this store.`
-                    : 'Enable quick approvals for purchases, deposits, and withdrawals in this store.'}
-                </p>
-              </div>
-              <ActionButton
-                className="shrink-0"
-                variant={activeSessionKey ? 'secondary' : 'primary'}
-                disabled={!canManageSessionKey}
-                onClick={activeSessionKey ? disableSessionKey : enableSessionKey}
-                icon={busy === 'session-key' ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}
-              >
-                {busy === 'session-key' ? 'Updating' : activeSessionKey ? 'Disable' : 'Enable'}
-              </ActionButton>
-            </div>
-          ) : null}
 
           {sessionNeedsStart && channelReady ? (
             <div className="mt-4 flex flex-col gap-3 rounded-lg border border-black/10 bg-white/90 p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
