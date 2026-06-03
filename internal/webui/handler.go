@@ -21,10 +21,6 @@ func New() (http.Handler, error) {
 			serveIndex(w, sub)
 			return
 		}
-		if cleanPath == "/reference" || cleanPath == "/advanced" {
-			http.NotFound(w, r)
-			return
-		}
 		if strings.HasPrefix(cleanPath, "/api/") {
 			http.NotFound(w, r)
 			return
@@ -36,7 +32,7 @@ func New() (http.Handler, error) {
 			return
 		}
 
-		serveIndex(w, sub)
+		http.NotFound(w, r)
 	}), nil
 }
 

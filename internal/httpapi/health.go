@@ -3,7 +3,7 @@ package httpapi
 import (
 	"net/http"
 
-	"github.com/layer-3/nitrolite-go-example/internal/nitrolite"
+	"github.com/layer-3/nitrolite-store-example/internal/nitrolite"
 )
 
 func healthHandler(manager *nitrolite.Manager) http.HandlerFunc {

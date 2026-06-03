@@ -10,19 +10,17 @@ import (
 
 // Config contains runtime configuration for the example service.
 type Config struct {
-	Port               string
-	LogLevel           string
-	ClearnodeWSURL     string
-	DemoPrivateKey     string
-	ConsoleAPIKey      string
-	SQLitePath         string
-	StoreName          string
-	StoreAppID         string
-	StoreAppPrivateKey string
-	MerchantName       string
-	MerchantAppID      string
-	BlockchainRPCURLs  map[string]string
-	HomeBlockchains    map[string]uint64
+	Port                         string
+	LogLevel                     string
+	ClearnodeWSURL               string
+	DemoPrivateKey               string
+	SQLitePath                   string
+	StoreName                    string
+	StoreAppID                   string
+	StoreAppPrivateKey           string
+	BlockchainRPCURLs            map[string]string
+	HomeBlockchains              map[string]uint64
+	StoreChannelBootstrapAmounts map[string]string
 }
 
 // Load reads process env and an optional .env file into a validated Config.
@@ -36,13 +34,14 @@ func Load(dotenvPath string) (*Config, error) {
 		LogLevel:           getEnv("LOG_LEVEL", "info"),
 		ClearnodeWSURL:     os.Getenv("CLEARNODE_WS_URL"),
 		DemoPrivateKey:     os.Getenv("DEMO_PRIVATE_KEY"),
-		ConsoleAPIKey:      os.Getenv("CONSOLE_API_KEY"),
-		SQLitePath:         getEnv("SQLITE_PATH", "./data/nitrolite-go-example.db"),
+		SQLitePath:         getEnv("SQLITE_PATH", "./data/nitrolite-store-example.db"),
 		StoreName:          getEnv("STORE_NAME", "Nitrolite App Session Store"),
 		StoreAppID:         getEnv("STORE_APP_ID", "default"),
 		StoreAppPrivateKey: strings.TrimSpace(os.Getenv("STORE_APP_PRIVATE_KEY")),
-		MerchantName:       getEnv("MERCHANT_NAME", "Nitrolite Sandbox Merchant"),
-		MerchantAppID:      getEnv("MERCHANT_APP_ID", "default"),
+		StoreChannelBootstrapAmounts: map[string]string{
+			"yusd":   "10",
+			"yellow": "10",
+		},
 	}
 
 	if err := parseJSONEnv("BLOCKCHAIN_RPC_URLS", &cfg.BlockchainRPCURLs); err != nil {
@@ -50,6 +49,11 @@ func Load(dotenvPath string) (*Config, error) {
 	}
 	if err := parseJSONEnv("HOME_BLOCKCHAINS", &cfg.HomeBlockchains); err != nil {
 		return nil, err
+	}
+	if raw := strings.TrimSpace(os.Getenv("STORE_CHANNEL_BOOTSTRAP_AMOUNTS")); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &cfg.StoreChannelBootstrapAmounts); err != nil {
+			return nil, fmt.Errorf("invalid STORE_CHANNEL_BOOTSTRAP_AMOUNTS: %w", err)
+		}
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -66,22 +70,19 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("missing CLEARNODE_WS_URL")
 	case c.DemoPrivateKey == "":
 		return fmt.Errorf("missing DEMO_PRIVATE_KEY")
-	case len(c.ConsoleAPIKey) < 32:
-		return fmt.Errorf("CONSOLE_API_KEY must be at least 32 characters")
 	case strings.TrimSpace(c.SQLitePath) == "":
 		return fmt.Errorf("missing SQLITE_PATH")
 	case strings.TrimSpace(c.StoreName) == "":
 		return fmt.Errorf("missing STORE_NAME")
 	case strings.TrimSpace(c.StoreAppID) == "":
 		return fmt.Errorf("missing STORE_APP_ID")
-	case strings.TrimSpace(c.MerchantName) == "":
-		return fmt.Errorf("missing MERCHANT_NAME")
-	case strings.TrimSpace(c.MerchantAppID) == "":
-		return fmt.Errorf("missing MERCHANT_APP_ID")
 	case len(c.BlockchainRPCURLs) == 0:
 		return fmt.Errorf("missing BLOCKCHAIN_RPC_URLS")
 	case len(c.HomeBlockchains) == 0:
 		return fmt.Errorf("missing HOME_BLOCKCHAINS")
+	}
+	if len(c.StoreChannelBootstrapAmounts) == 0 {
+		return fmt.Errorf("missing STORE_CHANNEL_BOOTSTRAP_AMOUNTS")
 	}
 
 	return nil

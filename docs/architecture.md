@@ -1,83 +1,52 @@
 # Architecture
 
-## Runtime shape
+## Runtime Shape
 
-- `cmd/server` loads config, signers, Nitrolite manager, SQLite store, and the HTTP/web handler
-- `internal/nitrolite.Manager` owns the active SDK client, health state, and reconnect loop
-- `internal/store` owns SQLite persistence for browser-scoped store sessions and purchases
-- `internal/service.StorefrontService` owns catalog, session bootstrap, submit-state dispatch, and content gating
-- `internal/httpapi` is a thin transport layer with decode -> service -> encode plus raw write auth
-- `web/` is a no-build static UI embedded into the Go binary
+- `cmd/server` loads config, signers, Nitrolite manager, SQLite store, and HTTP handler.
+- `internal/nitrolite.Manager` owns the active SDK client, health state, and reconnect loop.
+- `internal/store` persists wallet store sessions, purchases, and resumable deposit checkpoints.
+- `internal/service.WalletStoreService` owns bootstrap, app-session creation, signed update verification, catalog, purchase recording, and content gating.
+- `internal/httpapi` is a thin transport layer.
+- `frontend/` is the React source.
+- `internal/webui/dist` is the embedded production build served by Go.
 
-## Deployment shape
+## Product Surface
 
-- local development runs with `go run ./cmd/server`
-- Railway deployment should use the repo `Dockerfile` for deterministic build/start behavior
-- Railway persistence should mount a volume at `/app/data`
-- the Railway service should set `SQLITE_PATH=/app/data/nitrolite-go-example.db`
-- the app remains a single service that serves UI, API, and developer surfaces from the same origin
+The only product page is `/`.
 
-## Product surfaces
+It supports:
 
-- `/`
-  - App Session Micropayment Store
-  - deposit, purchase, withdraw, reader, and library
-- `/reference`
-  - embedded RapiDoc explorer backed by `/openapi.json`
-- `/advanced`
-  - raw developer/debug console
-  - JSON panels, raw mutations, session keys, destructive operations
+- MetaMask connection
+- app session creation
+- YUSD deposit
+- YUSD withdraw
+- YUSD item purchase
+- Yellow testnet deposit and withdraw
+- Yellow testnet item purchase
+- public demo purchased-content reading
+- activity tracing
 
-## Store session model
+## Store Session Model
 
-- one browser-scoped store session per asset
-- supported assets are data-driven from `HOME_BLOCKCHAINS`
-- current seeded catalog supports YUSD and YELLOW pricing
-- purchases are tracked per browser cookie and asset
+- One wallet-owned store session per supported asset.
+- The app session has exactly two participants: shopper wallet and store app signer.
+- Each participant has signature weight `1`.
+- Quorum is `2`.
+- Purchases are keyed by wallet, item, and asset. Deposit checkpoints are keyed by wallet and asset and hold the signed payload until the Clearnode session catches up. The active demo assets are `yusd` and `yellow`; `yusd` is the default walkthrough path.
 
-All product actions after session creation go through:
+## Submission Boundaries
 
-- `POST /api/v1/app-session/submit-state`
+- App session creation: backend calls `sdkClient.CreateAppSession`.
+- Deposit: backend stores a checkpoint and returns the store app signature, frontend calls `submitAppSessionDeposit`, and bootstrap exposes `pending_action` if the browser needs to resume.
+- Withdraw: backend calls `sdkClient.SubmitAppState`.
+- Purchase: backend calls `sdkClient.SubmitAppState`.
+- Content open: frontend calls a public demo GET route; backend verifies the wallet session and submitted purchase before returning content. This is not a production authorization boundary.
 
-The server dispatches by `session_data.action`:
+## Startup Sequence
 
-- `deposit`
-- `purchase`
-- `user_withdraw`
-- `app_withdraw`
-
-## Trust model
-
-This v1 build keeps Nitrolite signing on the server:
-
-- demo/user signer: `DEMO_PRIVATE_KEY`
-- store/app signer: derived from `DEMO_PRIVATE_KEY` unless `STORE_APP_PRIVATE_KEY` is set
-- browser identity: lightweight cookie namespace only
-
-That means:
-
-- the browser does not hold a Nitrolite signer yet
-- the same backend signers service every browser
-- store isolation is product-level and browser-scoped, not wallet-level
-
-This is deliberate to keep the example simple and runnable with the current Go SDK setup.
-
-## Startup sequence
-
-1. load config
-2. initialize demo/user signer
-3. derive or load store/app signer
-4. initialize Nitrolite manager
-5. initialize SQLite store
-6. start `manager.Run(ctx)`
-7. start `http.Server`
-
-There is no active merchant runner in the current product path.
-
-## Catalog and content
-
-- catalog metadata is seeded in `internal/service/store_app.go`
-- each item has per-asset pricing
-- content is stored inline with the seeded catalog for now
-- successful purchase writes a `purchases` record immediately
-- content access checks that purchase record before returning the body
+1. Load config.
+2. Initialize app signer.
+3. Initialize Nitrolite manager.
+4. Initialize SQLite store.
+5. Start `manager.Run(ctx)`.
+6. Start HTTP server.

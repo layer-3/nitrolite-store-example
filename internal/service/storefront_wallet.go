@@ -3,12 +3,13 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
-	appsigning "github.com/layer-3/nitrolite-go-example/internal/signing"
-	"github.com/layer-3/nitrolite-go-example/internal/store"
+	appsigning "github.com/layer-3/nitrolite-store-example/internal/signing"
+	"github.com/layer-3/nitrolite-store-example/internal/store"
 	"github.com/layer-3/nitrolite/pkg/app"
 	"github.com/layer-3/nitrolite/pkg/core"
 	"github.com/layer-3/nitrolite/pkg/rpc"
@@ -16,24 +17,21 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-const (
-	storeUpdateKindCreateSession = "create_session"
-	storeUpdateKindDeposit       = "submit_deposit_state"
-	storeUpdateKindAppState      = "submit_app_state"
-)
-
 type StoreBootstrapResponse struct {
-	StoreName       string              `json:"store_name"`
-	AppID           string              `json:"app_id"`
-	AppSigner       string              `json:"app_signer"`
-	WalletAddress   string              `json:"wallet_address"`
-	SelectedAsset   string              `json:"selected_asset"`
-	DefaultAsset    string              `json:"default_asset"`
-	SupportedAssets []string            `json:"supported_assets"`
-	AvailableBalance string             `json:"available_balance"`
-	Catalog         []StoreCatalogItem  `json:"catalog"`
-	Session         StoreShopperSession `json:"session"`
-	Library         []StoreLibraryItem  `json:"library"`
+	StoreName        string                `json:"store_name"`
+	AppID            string                `json:"app_id"`
+	AppSigner        string                `json:"app_signer"`
+	WalletAddress    string                `json:"wallet_address"`
+	SelectedAsset    string                `json:"selected_asset"`
+	DefaultAsset     string                `json:"default_asset"`
+	SupportedAssets  []string              `json:"supported_assets"`
+	AssetDecimals    map[string]uint8      `json:"asset_decimals"`
+	AvailableBalance string                `json:"available_balance"`
+	ChannelReadiness StoreChannelReadiness `json:"channel_readiness"`
+	Catalog          []StoreCatalogItem    `json:"catalog"`
+	Session          StoreShopperSession   `json:"session"`
+	Library          []StoreLibraryItem    `json:"library"`
+	PendingAction    *StorePendingAction   `json:"pending_action,omitempty"`
 }
 
 type StoreShopperSession struct {
@@ -56,37 +54,84 @@ type StoreLibraryItem struct {
 }
 
 type StoreUpdateRequest struct {
-	Asset         string                `json:"asset"`
-	Kind          string                `json:"kind"`
-	Definition    *rpc.AppDefinitionV1  `json:"definition,omitempty"`
-	SessionData   string                `json:"session_data,omitempty"`
+	WalletAddress  string                `json:"wallet_address,omitempty"`
+	Asset          string                `json:"asset"`
 	AppStateUpdate *rpc.AppStateUpdateV1 `json:"app_state_update,omitempty"`
-	UserSignature string                `json:"user_signature,omitempty"`
-	UserState     *rpc.StateV1          `json:"user_state,omitempty"`
+	UserSignature  string                `json:"user_signature,omitempty"`
 }
 
-type submitDepositFunc func(ctx context.Context, wsURL string, req rpc.AppSessionsV1SubmitDepositStateRequest) (string, error)
+type StoreInitRequest struct {
+	WalletAddress string              `json:"wallet_address,omitempty"`
+	Asset         string              `json:"asset"`
+	Definition    rpc.AppDefinitionV1 `json:"definition"`
+	SessionData   string              `json:"session_data,omitempty"`
+	UserSignature string              `json:"user_signature"`
+}
+
+type StoreContentRequest struct {
+	WalletAddress string
+	Asset         string
+}
+
+type StorePendingAction struct {
+	Type           string               `json:"type"`
+	Status         string               `json:"status"`
+	Asset          string               `json:"asset"`
+	AppSessionID   string               `json:"app_session_id"`
+	Version        uint64               `json:"version"`
+	Amount         string               `json:"amount"`
+	AppStateUpdate rpc.AppStateUpdateV1 `json:"app_state_update"`
+	UserSignature  string               `json:"user_signature"`
+	AppSignature   string               `json:"app_signature"`
+	CreatedAt      string               `json:"created_at"`
+	UpdatedAt      string               `json:"updated_at"`
+}
+
+type StoreChannelReadiness struct {
+	Status                  string `json:"status"`
+	Message                 string `json:"message"`
+	HomeBlockchainID        uint64 `json:"home_blockchain_id"`
+	BootstrapAmount         string `json:"bootstrap_amount"`
+	AvailableBalance        string `json:"available_balance"`
+	PendingBalance          string `json:"pending_balance"`
+	RequiresChannelCreation bool   `json:"requires_channel_creation"`
+	PendingTransition       string `json:"pending_transition,omitempty"`
+	PendingAmount           string `json:"pending_amount,omitempty"`
+	OnChainBalance          string `json:"on_chain_balance"`
+}
+
+type StoreUpdateResponse struct {
+	Status        string                  `json:"status"`
+	Intent        string                  `json:"intent"`
+	Asset         string                  `json:"asset"`
+	AppSessionID  string                  `json:"app_session_id"`
+	AppSignature  string                  `json:"app_signature,omitempty"`
+	PendingAction *StorePendingAction     `json:"pending_action,omitempty"`
+	Bootstrap     *StoreBootstrapResponse `json:"bootstrap,omitempty"`
+}
+
 type submitAppStateFunc func(ctx context.Context, wsURL string, req rpc.AppSessionsV1SubmitAppStateRequest) error
 type createAppSessionFunc func(ctx context.Context, wsURL string, req rpc.AppSessionsV1CreateAppSessionRequest) (*rpc.AppSessionsV1CreateAppSessionResponse, error)
 
 type WalletStoreService struct {
-	provider         clientProvider
-	store            *store.Store
-	appSigner        appsigning.Signer
-	storeName        string
-	appID            string
-	defaultAsset     string
-	supportedAssets  []string
-	catalog          []StoreCatalogItem
-	wsURL            string
-	now              func() time.Time
-	submitDepositRPC submitDepositFunc
-	submitAppStateRPC submitAppStateFunc
-	createAppSessionRPC createAppSessionFunc
+	provider                clientProvider
+	store                   *store.Store
+	appSigner               appsigning.Signer
+	storeName               string
+	appID                   string
+	defaultAsset            string
+	supportedAssets         []string
+	catalog                 []StoreCatalogItem
+	wsURL                   string
+	homeBlockchains         map[string]uint64
+	channelBootstrapAmounts map[string]string
+	now                     func() time.Time
+	submitAppStateRPC       submitAppStateFunc
+	createAppSessionRPC     createAppSessionFunc
 }
 
-func NewWalletStoreService(provider clientProvider, appStore *store.Store, appSigner appsigning.Signer, storeName string, appID string, homeBlockchains map[string]uint64, wsURL string) *WalletStoreService {
-	assets := sortedAssets(homeBlockchains)
+func NewWalletStoreService(provider clientProvider, appStore *store.Store, appSigner appsigning.Signer, storeName string, appID string, homeBlockchains map[string]uint64, wsURL string, channelBootstrapAmounts ...map[string]string) *WalletStoreService {
+	assets := supportedStoreAssets(homeBlockchains)
 	defaultAsset := "yusd"
 	if len(assets) > 0 {
 		defaultAsset = assets[0]
@@ -97,21 +142,26 @@ func NewWalletStoreService(provider clientProvider, appStore *store.Store, appSi
 			}
 		}
 	}
+	amounts := defaultChannelBootstrapAmounts()
+	if len(channelBootstrapAmounts) > 0 {
+		amounts = normalizeChannelBootstrapAmounts(channelBootstrapAmounts[0])
+	}
 
 	return &WalletStoreService{
-		provider:         provider,
-		store:            appStore,
-		appSigner:        appSigner,
-		storeName:        strings.TrimSpace(storeName),
-		appID:            strings.TrimSpace(appID),
-		defaultAsset:     defaultAsset,
-		supportedAssets:  assets,
-		catalog:          seededCatalog(),
-		wsURL:            strings.TrimSpace(wsURL),
-		now:              time.Now,
-		submitDepositRPC:    submitDepositStateRPC,
-		submitAppStateRPC:   submitAppStateRPC,
-		createAppSessionRPC: createAppSessionRPC,
+		provider:                provider,
+		store:                   appStore,
+		appSigner:               appSigner,
+		storeName:               strings.TrimSpace(storeName),
+		appID:                   strings.TrimSpace(appID),
+		defaultAsset:            defaultAsset,
+		supportedAssets:         assets,
+		catalog:                 seededCatalog(),
+		wsURL:                   strings.TrimSpace(wsURL),
+		homeBlockchains:         normalizeHomeBlockchains(homeBlockchains),
+		channelBootstrapAmounts: amounts,
+		now:                     time.Now,
+		submitAppStateRPC:       submitAppStateRPC,
+		createAppSessionRPC:     createAppSessionRPC,
 	}
 }
 
@@ -125,21 +175,16 @@ func (s *WalletStoreService) Bootstrap(ctx context.Context, walletAddress string
 	if err != nil {
 		return nil, err
 	}
-	availableBalance, err := s.availableBalance(ctx, walletAddress, asset)
-	if err != nil {
-		return nil, err
-	}
-	library, err := s.library(ctx, walletAddress, asset)
-	if err != nil {
-		return nil, err
-	}
-
+	assetDecimals := s.assetDecimals(ctx)
+	readiness := s.channelReadiness(ctx, walletAddress, asset)
+	availableBalance := readiness.AvailableBalance
 	session := StoreShopperSession{
 		Asset:          asset,
 		Status:         "missing",
 		UserAllocation: "0",
 		AppAllocation:  "0",
 	}
+	var pendingAction *StorePendingAction
 
 	stored, err := s.store.GetWalletSession(ctx, walletAddress, asset)
 	if err != nil && err != store.ErrNotFound {
@@ -153,7 +198,29 @@ func (s *WalletStoreService) Bootstrap(ctx context.Context, walletAddress string
 				return nil, syncErr
 			}
 			session = *summary
+			if err := s.reconcilePendingPurchases(ctx, walletAddress, asset, *current); err != nil {
+				return nil, err
+			}
+			pendingAction, err = s.reconcileDepositCheckpoint(ctx, walletAddress, asset, *current)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			session = StoreShopperSession{
+				Asset:          asset,
+				AppSessionID:   stored.AppSessionID,
+				Status:         "sync_failed",
+				Version:        stored.Version,
+				UserAllocation: stored.UserAllocation,
+				AppAllocation:  stored.AppAllocation,
+				SessionData:    stored.SessionData,
+			}
 		}
+	}
+
+	library, err := s.library(ctx, walletAddress, asset)
+	if err != nil {
+		return nil, err
 	}
 
 	return &StoreBootstrapResponse{
@@ -164,22 +231,51 @@ func (s *WalletStoreService) Bootstrap(ctx context.Context, walletAddress string
 		SelectedAsset:    asset,
 		DefaultAsset:     s.defaultAsset,
 		SupportedAssets:  append([]string(nil), s.supportedAssets...),
+		AssetDecimals:    assetDecimals,
 		AvailableBalance: availableBalance,
+		ChannelReadiness: readiness,
 		Catalog:          catalog,
 		Session:          session,
 		Library:          library,
+		PendingAction:    pendingAction,
 	}, nil
 }
 
-func (s *WalletStoreService) Content(ctx context.Context, walletAddress string, asset string, id string) (*StoreCatalogItem, error) {
-	asset, err := s.normalizeAsset(asset)
+func (s *WalletStoreService) Content(ctx context.Context, id string, req StoreContentRequest) (*StoreCatalogItem, error) {
+	walletAddress := strings.TrimSpace(req.WalletAddress)
+	if walletAddress == "" {
+		return nil, invalidf("wallet_address is required")
+	}
+
+	asset, err := s.normalizeAsset(req.Asset)
 	if err != nil {
 		return nil, err
 	}
+
 	item := s.catalogItem(id)
 	if item == nil {
 		return nil, notFoundf("catalog item not found")
 	}
+
+	stored, err := s.store.GetWalletSession(ctx, walletAddress, asset)
+	if err != nil {
+		if err == store.ErrNotFound {
+			return nil, notFoundf("store session not found")
+		}
+		return nil, fmt.Errorf("failed to load wallet session: %w", err)
+	}
+
+	current, err := s.lookupSession(ctx, stored.AppSessionID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.validateSessionParticipants(current, walletAddress); err != nil {
+		return nil, err
+	}
+	if err := s.reconcilePendingPurchases(ctx, walletAddress, asset, *current); err != nil {
+		return nil, err
+	}
+
 	owned, err := s.store.HasWalletPurchase(ctx, walletAddress, id, asset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check purchase: %w", err)
@@ -194,28 +290,12 @@ func (s *WalletStoreService) Content(ctx context.Context, walletAddress string, 
 	return &copyItem, nil
 }
 
-func (s *WalletStoreService) SubmitUpdate(ctx context.Context, walletAddress string, req StoreUpdateRequest) (*StoreBootstrapResponse, error) {
+func (s *WalletStoreService) CreateSession(ctx context.Context, req StoreInitRequest) (*StoreBootstrapResponse, error) {
 	asset, err := s.normalizeAsset(req.Asset)
 	if err != nil {
 		return nil, err
 	}
 
-	switch strings.TrimSpace(req.Kind) {
-	case storeUpdateKindCreateSession:
-		return s.createSession(ctx, walletAddress, asset, req)
-	case storeUpdateKindDeposit:
-		return s.submitDeposit(ctx, walletAddress, asset, req)
-	case storeUpdateKindAppState:
-		return s.submitAppStateUpdate(ctx, walletAddress, asset, req)
-	default:
-		return nil, invalidf("unsupported update kind")
-	}
-}
-
-func (s *WalletStoreService) createSession(ctx context.Context, walletAddress string, asset string, req StoreUpdateRequest) (*StoreBootstrapResponse, error) {
-	if req.Definition == nil {
-		return nil, invalidf("definition is required")
-	}
 	if strings.TrimSpace(req.UserSignature) == "" {
 		return nil, invalidf("user_signature is required")
 	}
@@ -223,7 +303,11 @@ func (s *WalletStoreService) createSession(ctx context.Context, walletAddress st
 		return nil, err
 	}
 
-	definition, err := appDefinitionFromRPC(*req.Definition)
+	definition, err := appDefinitionFromRPC(req.Definition)
+	if err != nil {
+		return nil, err
+	}
+	walletAddress, err := s.walletFromDefinition(definition, req.WalletAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -233,6 +317,9 @@ func (s *WalletStoreService) createSession(ctx context.Context, walletAddress st
 	if err := verifyCreateSessionSignature(walletAddress, definition, req.SessionData, req.UserSignature); err != nil {
 		return nil, err
 	}
+	if err := s.requireFundedHomeChannel(ctx, walletAddress, asset); err != nil {
+		return nil, err
+	}
 
 	appSig, err := signCreateAppSessionRequest(definition, req.SessionData, s.appSigner)
 	if err != nil {
@@ -240,13 +327,13 @@ func (s *WalletStoreService) createSession(ctx context.Context, walletAddress st
 	}
 
 	createReq := rpc.AppSessionsV1CreateAppSessionRequest{
-		Definition:   *req.Definition,
-		SessionData:  req.SessionData,
-		QuorumSigs:   []string{req.UserSignature, appSig},
+		Definition:  req.Definition,
+		SessionData: req.SessionData,
+		QuorumSigs:  []string{req.UserSignature, appSig},
 	}
 	resp, err := s.createAppSessionRPC(ctx, s.wsURL, createReq)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create app session: %w", err)
+		return nil, upstreamf(err, "failed to create app session")
 	}
 
 	now := s.now().UTC()
@@ -268,39 +355,67 @@ func (s *WalletStoreService) createSession(ctx context.Context, walletAddress st
 	return s.Bootstrap(ctx, walletAddress, asset)
 }
 
-func (s *WalletStoreService) submitDeposit(ctx context.Context, walletAddress string, asset string, req StoreUpdateRequest) (*StoreBootstrapResponse, error) {
+func (s *WalletStoreService) SubmitUpdate(ctx context.Context, req StoreUpdateRequest) (*StoreUpdateResponse, error) {
+	asset, err := s.normalizeAsset(req.Asset)
+	if err != nil {
+		return nil, err
+	}
 	if req.AppStateUpdate == nil {
 		return nil, invalidf("app_state_update is required")
 	}
-	if req.UserState == nil {
-		return nil, invalidf("user_state is required")
+
+	normalizedRPCUpdate, err := s.normalizeAppStateUpdateForAsset(ctx, asset, *req.AppStateUpdate)
+	if err != nil {
+		return nil, err
+	}
+	req.AppStateUpdate = &normalizedRPCUpdate
+
+	update, err := appStateUpdateFromRPC(normalizedRPCUpdate)
+	if err != nil {
+		return nil, err
+	}
+
+	switch update.Intent {
+	case app.AppStateUpdateIntentDeposit:
+		return s.submitDeposit(ctx, asset, req, update)
+	case app.AppStateUpdateIntentWithdraw, app.AppStateUpdateIntentOperate:
+		return s.submitAppStateUpdate(ctx, asset, req, update)
+	default:
+		return nil, invalidf("unsupported app update intent")
+	}
+}
+
+func (s *WalletStoreService) submitDeposit(ctx context.Context, asset string, req StoreUpdateRequest, update app.AppStateUpdateV1) (*StoreUpdateResponse, error) {
+	if req.AppStateUpdate == nil {
+		return nil, invalidf("app_state_update is required")
 	}
 	if strings.TrimSpace(req.UserSignature) == "" {
 		return nil, invalidf("user_signature is required")
 	}
 
-	update, err := appStateUpdateFromRPC(*req.AppStateUpdate)
+	current, walletAddress, err := s.currentWalletSessionByAppSessionID(ctx, update.AppSessionID, asset)
 	if err != nil {
 		return nil, err
 	}
-	userState, err := stateFromRPC(*req.UserState)
-	if err != nil {
-		return nil, err
-	}
-
-	current, err := s.currentWalletSession(ctx, walletAddress, asset)
-	if err != nil {
-		return nil, err
+	if req.WalletAddress != "" && !strings.EqualFold(req.WalletAddress, walletAddress) {
+		return nil, conflictf("wallet_address does not match app session owner")
 	}
 	if err := s.validateSessionParticipants(current, walletAddress); err != nil {
 		return nil, err
 	}
-	if err := verifyAppStateSignature(walletAddress, update, req.UserSignature); err != nil {
+	if err := s.verifyAppStateSignature(ctx, walletAddress, update, req.UserSignature); err != nil {
 		return nil, err
 	}
 
-	depositAmount, err := s.validateDeposit(ctx, walletAddress, asset, current, update, userState)
+	if err := s.validateDeposit(walletAddress, asset, current, update); err != nil {
+		return nil, err
+	}
+
+	amount, err := depositAmountForState(walletAddress, s.appSigner.Address(), asset, current, update)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.ensureDepositAvailable(ctx, walletAddress, asset, amount); err != nil {
 		return nil, err
 	}
 
@@ -308,21 +423,45 @@ func (s *WalletStoreService) submitDeposit(ctx context.Context, walletAddress st
 	if err != nil {
 		return nil, err
 	}
-
-	_, err = s.submitDepositRPC(ctx, s.wsURL, rpc.AppSessionsV1SubmitDepositStateRequest{
-		AppStateUpdate: *req.AppStateUpdate,
-		QuorumSigs:     []string{req.UserSignature, appSig},
-		UserState:      *req.UserState,
-	})
+	updateJSON, err := json.Marshal(req.AppStateUpdate)
 	if err != nil {
-		return nil, fmt.Errorf("failed to submit deposit state: %w", err)
+		return nil, fmt.Errorf("failed to encode deposit checkpoint: %w", err)
+	}
+	now := s.now().UTC()
+	checkpoint := store.WalletDepositCheckpoint{
+		ID:             store.WalletDepositCheckpointID(walletAddress, asset),
+		WalletAddress:  walletAddress,
+		Asset:          asset,
+		AppSessionID:   update.AppSessionID,
+		Version:        update.Version,
+		Amount:         amount,
+		Status:         store.WalletDepositCheckpointStatusAppSigned,
+		AppStateUpdate: string(updateJSON),
+		UserSignature:  req.UserSignature,
+		AppSignature:   appSig,
+		SessionData:    update.SessionData,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if err := s.store.UpsertDepositCheckpoint(ctx, checkpoint); err != nil {
+		return nil, fmt.Errorf("failed to persist deposit checkpoint: %w", err)
+	}
+	pendingAction, err := depositCheckpointAction(checkpoint)
+	if err != nil {
+		return nil, err
 	}
 
-	_ = depositAmount
-	return s.Bootstrap(ctx, walletAddress, asset)
+	return &StoreUpdateResponse{
+		Status:        "signed",
+		Intent:        string(StoreIntentUserDeposit),
+		Asset:         asset,
+		AppSessionID:  update.AppSessionID,
+		AppSignature:  appSig,
+		PendingAction: pendingAction,
+	}, nil
 }
 
-func (s *WalletStoreService) submitAppStateUpdate(ctx context.Context, walletAddress string, asset string, req StoreUpdateRequest) (*StoreBootstrapResponse, error) {
+func (s *WalletStoreService) submitAppStateUpdate(ctx context.Context, asset string, req StoreUpdateRequest, update app.AppStateUpdateV1) (*StoreUpdateResponse, error) {
 	if req.AppStateUpdate == nil {
 		return nil, invalidf("app_state_update is required")
 	}
@@ -330,29 +469,32 @@ func (s *WalletStoreService) submitAppStateUpdate(ctx context.Context, walletAdd
 		return nil, invalidf("user_signature is required")
 	}
 
-	update, err := appStateUpdateFromRPC(*req.AppStateUpdate)
+	current, walletAddress, err := s.currentWalletSessionByAppSessionID(ctx, update.AppSessionID, asset)
 	if err != nil {
 		return nil, err
 	}
-
-	current, err := s.currentWalletSession(ctx, walletAddress, asset)
-	if err != nil {
-		return nil, err
+	if req.WalletAddress != "" && !strings.EqualFold(req.WalletAddress, walletAddress) {
+		return nil, conflictf("wallet_address does not match app session owner")
 	}
 	if err := s.validateSessionParticipants(current, walletAddress); err != nil {
 		return nil, err
 	}
-	if err := verifyAppStateSignature(walletAddress, update, req.UserSignature); err != nil {
+	if err := s.verifyAppStateSignature(ctx, walletAddress, update, req.UserSignature); err != nil {
 		return nil, err
 	}
 
 	purchaseItemID := ""
+	responseIntent := string(StoreIntentUserWithdraw)
 	switch update.Intent {
 	case app.AppStateUpdateIntentOperate:
+		if err := s.reconcilePendingPurchases(ctx, walletAddress, asset, *current); err != nil {
+			return nil, err
+		}
 		purchaseItemID, err = s.validatePurchase(ctx, walletAddress, asset, current, update)
 		if err != nil {
 			return nil, err
 		}
+		responseIntent = string(StoreIntentPurchase)
 	case app.AppStateUpdateIntentWithdraw:
 		if err := s.validateWithdraw(walletAddress, asset, current, update); err != nil {
 			return nil, err
@@ -365,28 +507,58 @@ func (s *WalletStoreService) submitAppStateUpdate(ctx context.Context, walletAdd
 	if err != nil {
 		return nil, err
 	}
-	if err := s.submitAppStateRPC(ctx, s.wsURL, rpc.AppSessionsV1SubmitAppStateRequest{
-		AppStateUpdate: *req.AppStateUpdate,
-		QuorumSigs:     []string{req.UserSignature, appSig},
-	}); err != nil {
-		return nil, fmt.Errorf("failed to submit app state: %w", err)
-	}
 
+	purchaseID := ""
 	if purchaseItemID != "" {
-		if err := s.store.RecordWalletPurchase(ctx, store.WalletPurchase{
-			ID:            store.WalletPurchaseID(walletAddress, asset, purchaseItemID),
+		purchaseID = store.WalletPurchaseID(walletAddress, asset, purchaseItemID)
+		now := s.now().UTC()
+		if err := s.store.UpsertPendingWalletPurchase(ctx, store.WalletPurchase{
+			ID:            purchaseID,
 			WalletAddress: walletAddress,
 			ItemID:        purchaseItemID,
 			Asset:         asset,
 			AppSessionID:  current.AppSessionID,
 			Version:       update.Version,
-			PurchasedAt:   s.now().UTC(),
+			Status:        store.WalletPurchaseStatusPending,
+			SessionData:   update.SessionData,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+			PurchasedAt:   now,
 		}); err != nil {
-			return nil, fmt.Errorf("failed to record purchase: %w", err)
+			if errors.Is(err, store.ErrConflict) {
+				return nil, conflictCodef("duplicate_purchase", "item already purchased")
+			}
+			return nil, fmt.Errorf("failed to prepare purchase: %w", err)
 		}
 	}
 
-	return s.Bootstrap(ctx, walletAddress, asset)
+	if err := s.submitAppStateRPC(ctx, s.wsURL, rpc.AppSessionsV1SubmitAppStateRequest{
+		AppStateUpdate: *req.AppStateUpdate,
+		QuorumSigs:     []string{req.UserSignature, appSig},
+	}); err != nil {
+		if purchaseID != "" {
+			_ = s.store.MarkWalletPurchaseFailed(ctx, purchaseID, s.now().UTC())
+		}
+		return nil, upstreamf(err, "failed to submit app state")
+	}
+
+	if purchaseID != "" {
+		if err := s.store.MarkWalletPurchaseSubmitted(ctx, purchaseID, s.now().UTC()); err != nil {
+			return nil, fmt.Errorf("failed to mark purchase submitted: %w", err)
+		}
+	}
+
+	bootstrap, err := s.Bootstrap(ctx, walletAddress, asset)
+	if err != nil {
+		return nil, err
+	}
+	return &StoreUpdateResponse{
+		Status:       "submitted",
+		Intent:       responseIntent,
+		Asset:        asset,
+		AppSessionID: update.AppSessionID,
+		Bootstrap:    bootstrap,
+	}, nil
 }
 
 func (s *WalletStoreService) catalogForAsset(asset string) ([]StoreCatalogItem, error) {
@@ -417,21 +589,188 @@ func (s *WalletStoreService) normalizeAsset(raw string) (string, error) {
 	return "", invalidf("unsupported asset")
 }
 
-func (s *WalletStoreService) availableBalance(ctx context.Context, walletAddress string, asset string) (string, error) {
-	client, _, err := activeClient(s.provider)
-	if err != nil {
-		return "", err
-	}
-	balances, err := client.GetBalances(ctx, walletAddress)
-	if err != nil {
-		return "", fmt.Errorf("failed to get balances: %w", err)
-	}
-	for _, entry := range balances {
-		if strings.EqualFold(entry.Asset, asset) {
-			return entry.Balance.String(), nil
+func (s *WalletStoreService) assetDecimals(ctx context.Context) map[string]uint8 {
+	defaults := defaultAssetDecimals()
+	out := make(map[string]uint8, len(s.supportedAssets))
+	supported := make(map[string]struct{}, len(s.supportedAssets))
+	for _, asset := range s.supportedAssets {
+		supported[asset] = struct{}{}
+		if decimals, ok := defaults[asset]; ok {
+			out[asset] = decimals
 		}
 	}
-	return "0", nil
+
+	client, _, err := activeClient(s.provider)
+	if err != nil {
+		return out
+	}
+	assets, err := client.GetAssets(ctx, nil)
+	if err != nil {
+		return out
+	}
+	for _, info := range assets {
+		for _, key := range []string{info.Symbol, info.Name} {
+			asset := strings.ToLower(strings.TrimSpace(key))
+			if _, ok := supported[asset]; ok {
+				out[asset] = info.Decimals
+			}
+		}
+	}
+	return out
+}
+
+func (s *WalletStoreService) assetDecimalsFor(ctx context.Context, asset string) uint8 {
+	asset = strings.ToLower(strings.TrimSpace(asset))
+	if decimals, ok := s.assetDecimals(ctx)[asset]; ok {
+		return decimals
+	}
+	if decimals, ok := defaultAssetDecimals()[asset]; ok {
+		return decimals
+	}
+	return 18
+}
+
+func (s *WalletStoreService) normalizeAppStateUpdateForAsset(ctx context.Context, asset string, update rpc.AppStateUpdateV1) (rpc.AppStateUpdateV1, error) {
+	decimals := s.assetDecimalsFor(ctx, asset)
+	normalized := update
+	normalized.Allocations = make([]rpc.AppAllocationV1, 0, len(update.Allocations))
+	for _, allocation := range update.Allocations {
+		allocationAsset := strings.ToLower(strings.TrimSpace(allocation.Asset))
+		if allocationAsset != asset {
+			return rpc.AppStateUpdateV1{}, conflictf("app allocation asset does not match selected asset")
+		}
+		amount, err := decimal.NewFromString(strings.TrimSpace(allocation.Amount))
+		if err != nil {
+			return rpc.AppStateUpdateV1{}, invalidf("invalid app_state_update allocation amount")
+		}
+		if amount.IsNegative() {
+			return rpc.AppStateUpdateV1{}, conflictf("app allocation amount cannot be negative")
+		}
+		normalizedAmount, err := normalizeAssetAmountForWire(asset, amount, decimals)
+		if err != nil {
+			return rpc.AppStateUpdateV1{}, err
+		}
+		allocation.Asset = allocationAsset
+		allocation.Amount = normalizedAmount
+		normalized.Allocations = append(normalized.Allocations, allocation)
+	}
+	return normalized, nil
+}
+
+func normalizeAssetAmountForWire(asset string, amount decimal.Decimal, decimals uint8) (string, error) {
+	if !amount.Equal(amount.Truncate(int32(decimals))) {
+		return "", invalidf("%s supports up to %d decimals", strings.ToUpper(asset), decimals)
+	}
+	return amount.StringFixed(int32(decimals)), nil
+}
+
+func (s *WalletStoreService) availableBalance(ctx context.Context, walletAddress string, asset string) (string, error) {
+	return s.channelReadiness(ctx, walletAddress, asset).AvailableBalance, nil
+}
+
+func (s *WalletStoreService) requireFundedHomeChannel(ctx context.Context, walletAddress string, asset string) error {
+	readiness := s.channelReadiness(ctx, walletAddress, asset)
+	if readiness.Status != "ready" {
+		return conflictCodef("channel_"+readiness.Status, "%s", readiness.Message)
+	}
+	return nil
+}
+
+func (s *WalletStoreService) channelReadiness(ctx context.Context, walletAddress string, asset string) StoreChannelReadiness {
+	chainID := s.homeBlockchains[asset]
+	bootstrapAmount := s.channelBootstrapAmount(asset)
+	readiness := StoreChannelReadiness{
+		Status:           "unavailable",
+		Message:          "channel readiness is unavailable",
+		HomeBlockchainID: chainID,
+		BootstrapAmount:  bootstrapAmount,
+		AvailableBalance: "0",
+		PendingBalance:   "0",
+		OnChainBalance:   "0",
+	}
+
+	client, _, err := activeClient(s.provider)
+	if err != nil {
+		readiness.Message = "nitronode is not reachable"
+		return readiness
+	}
+
+	signedState, signedErr := client.GetLatestState(ctx, walletAddress, asset, true)
+	signedReady := false
+	if signedErr == nil && signedState != nil {
+		readiness.PendingBalance = signedState.HomeLedger.UserBalance.String()
+		if signedState.HomeChannelID != nil && signedState.HomeLedger.UserBalance.IsPositive() {
+			readiness.AvailableBalance = signedState.HomeLedger.UserBalance.String()
+			signedReady = true
+		} else if signedState.HomeLedger.UserBalance.IsPositive() {
+			readiness.RequiresChannelCreation = true
+		}
+	}
+
+	latestState, latestErr := client.GetLatestState(ctx, walletAddress, asset, false)
+	if latestErr == nil && latestState != nil {
+		readiness.PendingBalance = latestState.HomeLedger.UserBalance.String()
+		latestHasFunds := latestState.HomeLedger.UserBalance.IsPositive()
+		latestHasOpenChannel := latestState.HomeChannelID != nil
+		latestMatchesSigned := signedState != nil && latestState.ID == signedState.ID && latestState.Version == signedState.Version
+		if latestHasFunds && latestHasOpenChannel && (latestState.UserSig != nil || latestMatchesSigned) {
+			readiness.Status = "ready"
+			readiness.Message = "home channel is ready"
+			readiness.AvailableBalance = latestState.HomeLedger.UserBalance.String()
+			return readiness
+		}
+		if latestHasFunds {
+			if !latestHasOpenChannel {
+				readiness.RequiresChannelCreation = true
+			}
+			if latestState.Transition.Type != core.TransitionTypeVoid || !latestState.Transition.Amount.IsZero() {
+				readiness.PendingTransition = latestState.Transition.Type.String()
+				readiness.PendingAmount = latestState.Transition.Amount.String()
+			}
+			readiness.Status = "ack_required"
+			if readiness.RequiresChannelCreation {
+				readiness.Message = "acknowledge received off-chain funds to open a home channel"
+			} else {
+				readiness.Message = "acknowledge pending channel funds before starting the store session"
+			}
+			return readiness
+		}
+	}
+
+	if readiness.RequiresChannelCreation {
+		readiness.Status = "ack_required"
+		readiness.Message = "complete channel setup for received off-chain funds"
+		return readiness
+	}
+
+	if signedReady {
+		readiness.Status = "ready"
+		readiness.Message = "home channel is ready"
+		return readiness
+	}
+
+	if chainID == 0 {
+		readiness.Status = "unavailable"
+		readiness.Message = "home blockchain is not configured for this asset"
+		return readiness
+	}
+
+	onChainBalance, err := client.GetOnChainBalance(ctx, chainID, asset, walletAddress)
+	if err != nil {
+		readiness.Status = "unavailable"
+		readiness.Message = "on-chain balance lookup failed"
+		return readiness
+	}
+	readiness.OnChainBalance = onChainBalance.String()
+	if onChainBalance.IsPositive() {
+		readiness.Status = "deposit_required"
+		readiness.Message = "prepare a funded home channel before starting the store session"
+		return readiness
+	}
+
+	readiness.Status = "funds_required"
+	readiness.Message = "add test funds before preparing a home channel"
+	return readiness
 }
 
 func (s *WalletStoreService) lookupSession(ctx context.Context, sessionID string) (*app.AppSessionInfoV1, error) {
@@ -442,7 +781,7 @@ func (s *WalletStoreService) lookupSession(ctx context.Context, sessionID string
 	opts := &sdk.GetAppSessionsOptions{AppSessionID: &sessionID}
 	sessions, _, err := client.GetAppSessions(ctx, opts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get app sessions: %w", err)
+		return nil, upstreamf(err, "failed to get app sessions")
 	}
 	for _, session := range sessions {
 		if session.AppSessionID == sessionID {
@@ -463,8 +802,23 @@ func (s *WalletStoreService) currentWalletSession(ctx context.Context, walletAdd
 	return s.lookupSession(ctx, stored.AppSessionID)
 }
 
+func (s *WalletStoreService) currentWalletSessionByAppSessionID(ctx context.Context, appSessionID string, asset string) (*app.AppSessionInfoV1, string, error) {
+	stored, err := s.store.GetWalletSessionByAppSessionID(ctx, appSessionID, asset)
+	if err != nil {
+		if err == store.ErrNotFound {
+			return nil, "", notFoundf("store session not found")
+		}
+		return nil, "", fmt.Errorf("failed to load wallet session: %w", err)
+	}
+	current, err := s.lookupSession(ctx, stored.AppSessionID)
+	if err != nil {
+		return nil, "", err
+	}
+	return current, stored.WalletAddress, nil
+}
+
 func (s *WalletStoreService) sessionSummary(ctx context.Context, walletAddress string, asset string, current app.AppSessionInfoV1) (*StoreShopperSession, error) {
-	userAmount, appAmount := balancesForAsset(current.Allocations, walletAddress, s.appSigner.Address(), asset)
+	userAmount, appAmount := displayBalancesForAsset(current.Allocations, walletAddress, s.appSigner.Address(), asset)
 	now := s.now().UTC()
 	if err := s.store.UpsertWalletSession(ctx, store.WalletStoreSession{
 		WalletAddress:  walletAddress,
@@ -514,6 +868,98 @@ func (s *WalletStoreService) library(ctx context.Context, walletAddress string, 
 	return items, nil
 }
 
+func (s *WalletStoreService) reconcilePendingPurchases(ctx context.Context, walletAddress string, asset string, current app.AppSessionInfoV1) error {
+	pending, err := s.store.ListPendingWalletPurchases(ctx, walletAddress, asset)
+	if err != nil {
+		return fmt.Errorf("failed to list pending purchases: %w", err)
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+
+	for _, purchase := range pending {
+		if purchase.AppSessionID != current.AppSessionID {
+			continue
+		}
+		if current.Version < purchase.Version {
+			continue
+		}
+		if strings.TrimSpace(current.SessionData) != strings.TrimSpace(purchase.SessionData) {
+			continue
+		}
+		if err := s.store.MarkWalletPurchaseSubmitted(ctx, purchase.ID, s.now().UTC()); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("failed to reconcile purchase: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *WalletStoreService) reconcileDepositCheckpoint(ctx context.Context, walletAddress string, asset string, current app.AppSessionInfoV1) (*StorePendingAction, error) {
+	checkpoint, err := s.store.GetActiveDepositCheckpoint(ctx, walletAddress, asset)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to load deposit checkpoint: %w", err)
+	}
+	if checkpoint.AppSessionID != current.AppSessionID {
+		if err := s.store.MarkDepositCheckpointFailed(ctx, checkpoint.ID, s.now().UTC()); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("failed to retire deposit checkpoint: %w", err)
+		}
+		return nil, nil
+	}
+	if current.Version >= checkpoint.Version {
+		if strings.TrimSpace(current.SessionData) == strings.TrimSpace(checkpoint.SessionData) {
+			if err := s.store.MarkDepositCheckpointSubmitted(ctx, checkpoint.ID, s.now().UTC()); err != nil && !errors.Is(err, store.ErrNotFound) {
+				return nil, fmt.Errorf("failed to reconcile deposit checkpoint: %w", err)
+			}
+			return nil, nil
+		}
+		if err := s.store.MarkDepositCheckpointFailed(ctx, checkpoint.ID, s.now().UTC()); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("failed to retire stale deposit checkpoint: %w", err)
+		}
+		return nil, nil
+	}
+	return depositCheckpointAction(*checkpoint)
+}
+
+func depositCheckpointAction(checkpoint store.WalletDepositCheckpoint) (*StorePendingAction, error) {
+	var update rpc.AppStateUpdateV1
+	if err := json.Unmarshal([]byte(checkpoint.AppStateUpdate), &update); err != nil {
+		return nil, fmt.Errorf("failed to decode deposit checkpoint: %w", err)
+	}
+	return &StorePendingAction{
+		Type:           string(StoreIntentUserDeposit),
+		Status:         checkpoint.Status,
+		Asset:          checkpoint.Asset,
+		AppSessionID:   checkpoint.AppSessionID,
+		Version:        checkpoint.Version,
+		Amount:         checkpoint.Amount,
+		AppStateUpdate: update,
+		UserSignature:  checkpoint.UserSignature,
+		AppSignature:   checkpoint.AppSignature,
+		CreatedAt:      checkpoint.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:      checkpoint.UpdatedAt.Format(time.RFC3339),
+	}, nil
+}
+
+func (s *WalletStoreService) walletFromDefinition(definition app.AppDefinitionV1, requestedWallet string) (string, error) {
+	walletAddress := strings.TrimSpace(requestedWallet)
+	for _, participant := range definition.Participants {
+		if strings.EqualFold(participant.WalletAddress, s.appSigner.Address()) {
+			continue
+		}
+		if walletAddress != "" && !strings.EqualFold(walletAddress, participant.WalletAddress) {
+			return "", conflictf("wallet_address does not match app session participant")
+		}
+		walletAddress = strings.TrimSpace(participant.WalletAddress)
+	}
+	if walletAddress == "" {
+		return "", invalidf("wallet participant is required")
+	}
+	return walletAddress, nil
+}
+
 func (s *WalletStoreService) validateCreateDefinition(definition app.AppDefinitionV1, walletAddress string) error {
 	if strings.TrimSpace(definition.ApplicationID) != s.appID {
 		return invalidf("application_id does not match configured app")
@@ -530,9 +976,9 @@ func (s *WalletStoreService) validateCreateDefinition(definition app.AppDefiniti
 	for _, participant := range definition.Participants {
 		switch {
 		case strings.EqualFold(participant.WalletAddress, walletAddress):
-			seenWallet = participant.SignatureWeight > 0
+			seenWallet = participant.SignatureWeight == 1
 		case strings.EqualFold(participant.WalletAddress, s.appSigner.Address()):
-			seenApp = participant.SignatureWeight > 0
+			seenApp = participant.SignatureWeight == 1
 		default:
 			return invalidf("unexpected app session participant")
 		}
@@ -556,15 +1002,18 @@ func (s *WalletStoreService) validateSessionParticipants(current *app.AppSession
 	if len(current.AppDefinition.Participants) != 2 {
 		return conflictf("unexpected app session participant set")
 	}
+	if current.AppDefinition.Quorum != 2 {
+		return conflictf("unexpected app session quorum")
+	}
 
 	seenWallet := false
 	seenApp := false
 	for _, participant := range current.AppDefinition.Participants {
 		switch {
 		case strings.EqualFold(participant.WalletAddress, walletAddress):
-			seenWallet = true
+			seenWallet = participant.SignatureWeight == 1
 		case strings.EqualFold(participant.WalletAddress, s.appSigner.Address()):
-			seenApp = true
+			seenApp = participant.SignatureWeight == 1
 		}
 	}
 	if !seenWallet || !seenApp {
@@ -581,17 +1030,21 @@ func (s *WalletStoreService) validatePurchase(ctx context.Context, walletAddress
 		return "", conflictf("app_session_id does not match active store session")
 	}
 	if update.Version != current.Version+1 {
-		return "", conflictf("app session version is stale")
+		return "", conflictCodef("stale_version", "app session version is stale")
 	}
 
 	var sessionData StoreSessionData
 	if err := json.Unmarshal([]byte(strings.TrimSpace(update.SessionData)), &sessionData); err != nil {
 		return "", invalidf("invalid session_data")
 	}
-	if sessionData.Action != ActionPurchase {
-		return "", invalidf("purchase session_data.action must be purchase")
+	if sessionData.Intent != StoreIntentPurchase {
+		return "", invalidf("purchase session_data.intent must be purchase")
 	}
-	item := s.catalogItem(sessionData.ItemID)
+	itemID, err := sessionDataItemID(sessionData.ItemID)
+	if err != nil {
+		return "", err
+	}
+	item := s.catalogItem(itemID)
 	if item == nil {
 		return "", notFoundf("catalog item not found")
 	}
@@ -600,7 +1053,7 @@ func (s *WalletStoreService) validatePurchase(ctx context.Context, walletAddress
 	if err != nil {
 		return "", fmt.Errorf("invalid catalog price for %s: %w", item.ID, err)
 	}
-	sessionAmount, err := parsePositiveAmount(sessionData.Price)
+	sessionAmount, err := parsePositiveAmount(sessionData.ItemPrice)
 	if err != nil {
 		return "", err
 	}
@@ -612,12 +1065,18 @@ func (s *WalletStoreService) validatePurchase(ctx context.Context, walletAddress
 		return "", fmt.Errorf("failed to check purchase: %w", err)
 	}
 	if alreadyOwned {
-		return "", conflictf("item already purchased")
+		return "", conflictCodef("duplicate_purchase", "item already purchased")
 	}
 
 	price := sessionAmount
-	currentUser, currentApp := balancesForAsset(current.Allocations, walletAddress, s.appSigner.Address(), asset)
-	nextUser, nextApp := balancesForAsset(update.Allocations, walletAddress, s.appSigner.Address(), asset)
+	currentUser, currentApp, err := currentBalancesForAsset(current.Allocations, walletAddress, s.appSigner.Address(), asset)
+	if err != nil {
+		return "", err
+	}
+	nextUser, nextApp, err := strictBalancesForAsset(update.Allocations, walletAddress, s.appSigner.Address(), asset)
+	if err != nil {
+		return "", err
+	}
 	if !nextUser.Equal(currentUser.Sub(price)) {
 		return "", conflictf("purchase user allocation delta is invalid")
 	}
@@ -628,7 +1087,7 @@ func (s *WalletStoreService) validatePurchase(ctx context.Context, walletAddress
 		return "", conflictf("purchase allocations must conserve total balance")
 	}
 	if nextUser.IsNegative() {
-		return "", conflictf("purchase would overdraw user allocation")
+		return "", conflictCodef("insufficient_balance", "purchase would overdraw user allocation")
 	}
 	return item.ID, nil
 }
@@ -641,23 +1100,37 @@ func (s *WalletStoreService) validateWithdraw(walletAddress string, asset string
 		return conflictf("app_session_id does not match active store session")
 	}
 	if update.Version != current.Version+1 {
-		return conflictf("app session version is stale")
+		return conflictCodef("stale_version", "app session version is stale")
 	}
 
 	var sessionData StoreSessionData
 	if err := json.Unmarshal([]byte(strings.TrimSpace(update.SessionData)), &sessionData); err != nil {
 		return invalidf("invalid session_data")
 	}
-	if sessionData.Action != ActionUserWithdraw {
-		return invalidf("withdraw session_data.action must be user_withdraw")
+	if sessionData.Intent != StoreIntentUserWithdraw {
+		return invalidf("withdraw session_data.intent must be user_withdraw")
 	}
-
-	amount, err := parsePositiveAmount(sessionData.Amount)
+	currentUser, currentApp, err := currentBalancesForAsset(current.Allocations, walletAddress, s.appSigner.Address(), asset)
 	if err != nil {
 		return err
 	}
-	currentUser, currentApp := balancesForAsset(current.Allocations, walletAddress, s.appSigner.Address(), asset)
-	nextUser, nextApp := balancesForAsset(update.Allocations, walletAddress, s.appSigner.Address(), asset)
+	nextUser, nextApp, err := strictBalancesForAsset(update.Allocations, walletAddress, s.appSigner.Address(), asset)
+	if err != nil {
+		return err
+	}
+	amount := currentUser.Sub(nextUser)
+	if !amount.IsPositive() {
+		return conflictf("withdraw amount must be positive")
+	}
+	if strings.TrimSpace(sessionData.Amount) != "" {
+		sessionAmount, err := parsePositiveAmount(sessionData.Amount)
+		if err != nil {
+			return err
+		}
+		if !sessionAmount.Equal(amount) {
+			return conflictf("withdraw session_data amount does not match allocation delta")
+		}
+	}
 	if !nextUser.Equal(currentUser.Sub(amount)) {
 		return conflictf("withdraw user allocation delta is invalid")
 	}
@@ -665,82 +1138,94 @@ func (s *WalletStoreService) validateWithdraw(walletAddress string, asset string
 		return conflictf("withdraw cannot change app allocation")
 	}
 	if nextUser.IsNegative() {
-		return conflictf("withdraw would overdraw user allocation")
+		return conflictCodef("insufficient_balance", "withdraw would overdraw user allocation")
 	}
 	return nil
 }
 
-func (s *WalletStoreService) validateDeposit(ctx context.Context, walletAddress string, asset string, current *app.AppSessionInfoV1, update app.AppStateUpdateV1, userState core.State) (decimal.Decimal, error) {
+func (s *WalletStoreService) validateDeposit(walletAddress string, asset string, current *app.AppSessionInfoV1, update app.AppStateUpdateV1) error {
 	if update.Intent != app.AppStateUpdateIntentDeposit {
-		return decimal.Zero, invalidf("deposit must use deposit intent")
+		return invalidf("deposit must use deposit intent")
 	}
 	if update.AppSessionID != current.AppSessionID {
-		return decimal.Zero, conflictf("app_session_id does not match active store session")
+		return conflictf("app_session_id does not match active store session")
 	}
 	if update.Version != current.Version+1 {
-		return decimal.Zero, conflictf("app session version is stale")
+		return conflictCodef("stale_version", "app session version is stale")
 	}
 
 	var sessionData StoreSessionData
 	if err := json.Unmarshal([]byte(strings.TrimSpace(update.SessionData)), &sessionData); err != nil {
-		return decimal.Zero, invalidf("invalid session_data")
+		return invalidf("invalid session_data")
 	}
-	if sessionData.Action != ActionDeposit {
-		return decimal.Zero, invalidf("deposit session_data.action must be deposit")
+	if sessionData.Intent != StoreIntentUserDeposit {
+		return invalidf("deposit session_data.intent must be user_deposit")
 	}
 
-	amount, err := parsePositiveAmount(sessionData.Amount)
+	currentUser, currentApp, err := currentBalancesForAsset(current.Allocations, walletAddress, s.appSigner.Address(), asset)
 	if err != nil {
-		return decimal.Zero, err
+		return err
 	}
-
-	currentUser, currentApp := balancesForAsset(current.Allocations, walletAddress, s.appSigner.Address(), asset)
-	nextUser, nextApp := balancesForAsset(update.Allocations, walletAddress, s.appSigner.Address(), asset)
+	nextUser, nextApp, err := strictBalancesForAsset(update.Allocations, walletAddress, s.appSigner.Address(), asset)
+	if err != nil {
+		return err
+	}
+	amount := nextUser.Sub(currentUser)
+	if !amount.IsPositive() {
+		return conflictf("deposit amount must be positive")
+	}
+	if strings.TrimSpace(sessionData.Amount) != "" {
+		sessionAmount, err := parsePositiveAmount(sessionData.Amount)
+		if err != nil {
+			return err
+		}
+		if !sessionAmount.Equal(amount) {
+			return conflictf("deposit session_data amount does not match allocation delta")
+		}
+	}
 	if !nextUser.Equal(currentUser.Add(amount)) {
-		return decimal.Zero, conflictf("deposit user allocation delta is invalid")
+		return conflictf("deposit user allocation delta is invalid")
 	}
 	if !nextApp.Equal(currentApp) {
-		return decimal.Zero, conflictf("deposit cannot change app allocation")
+		return conflictf("deposit cannot change app allocation")
+	}
+	return nil
+}
+
+func (s *WalletStoreService) ensureDepositAvailable(ctx context.Context, walletAddress string, asset string, amount string) error {
+	depositAmount, err := decimal.NewFromString(strings.TrimSpace(amount))
+	if err != nil {
+		return fmt.Errorf("failed to parse deposit amount: %w", err)
 	}
 
-	assetStore, err := s.assetStore(ctx)
+	availableRaw, err := s.availableBalance(ctx, walletAddress, asset)
 	if err != nil {
-		return decimal.Zero, err
+		return err
 	}
-	client, _, err := activeClient(s.provider)
+	availableAmount, err := decimal.NewFromString(strings.TrimSpace(availableRaw))
 	if err != nil {
-		return decimal.Zero, err
+		return fmt.Errorf("failed to parse available balance: %w", err)
 	}
-	currentState, err := client.GetLatestState(ctx, walletAddress, asset, false)
+	if depositAmount.GreaterThan(availableAmount) {
+		return conflictCodef("insufficient_balance", "deposit exceeds available balance")
+	}
+	return nil
+}
+
+func depositAmountForState(walletAddress string, appSignerAddress string, asset string, current *app.AppSessionInfoV1, update app.AppStateUpdateV1) (string, error) {
+	currentUser, _, err := currentBalancesForAsset(current.Allocations, walletAddress, appSignerAddress, asset)
 	if err != nil {
-		return decimal.Zero, fmt.Errorf("failed to get latest state: %w", err)
+		return "", err
 	}
-	advancer := core.NewStateAdvancerV1(assetStore)
-	if err := advancer.ValidateAdvancement(*currentState, userState); err != nil {
-		return decimal.Zero, conflictf("user_state is not a valid next state: %v", err)
+	nextUser, _, err := strictBalancesForAsset(update.Allocations, walletAddress, appSignerAddress, asset)
+	if err != nil {
+		return "", err
 	}
-	if userState.Transition.Type != core.TransitionTypeCommit {
-		return decimal.Zero, conflictf("deposit user_state transition must be commit")
+	amount := nextUser.Sub(currentUser)
+	if !amount.IsPositive() {
+		return "", conflictf("deposit amount must be positive")
 	}
-	if !strings.EqualFold(userState.Transition.AccountID, update.AppSessionID) {
-		return decimal.Zero, conflictf("deposit user_state account_id must equal app_session_id")
-	}
-	if !userState.Transition.Amount.Equal(amount) {
-		return decimal.Zero, conflictf("deposit user_state amount must match session_data amount")
-	}
-	if !strings.EqualFold(userState.Asset, asset) {
-		return decimal.Zero, conflictf("deposit user_state asset mismatch")
-	}
-	if !strings.EqualFold(userState.UserWallet, walletAddress) {
-		return decimal.Zero, conflictf("deposit user_state wallet mismatch")
-	}
-	if userState.UserSig == nil || strings.TrimSpace(*userState.UserSig) == "" {
-		return decimal.Zero, conflictf("deposit user_state is missing user_sig")
-	}
-	if err := verifyChannelStateSignature(walletAddress, userState, assetStore); err != nil {
-		return decimal.Zero, err
-	}
-	return amount, nil
+	return amount.String(), nil
 }
 
 func (s *WalletStoreService) ensureApp(ctx context.Context) error {
@@ -751,7 +1236,10 @@ func (s *WalletStoreService) ensureApp(ctx context.Context) error {
 	opts := &sdk.GetAppsOptions{AppID: &s.appID}
 	apps, _, err := client.GetApps(ctx, opts)
 	if err != nil {
-		return fmt.Errorf("failed to get apps: %w", err)
+		if isAppRegistryDisabledError(err) {
+			return nil
+		}
+		return upstreamf(err, "failed to get apps")
 	}
 	for _, info := range apps {
 		if info.App.ID == s.appID {
@@ -759,9 +1247,13 @@ func (s *WalletStoreService) ensureApp(ctx context.Context) error {
 		}
 	}
 	if err := client.RegisterApp(ctx, s.appID, `{"product":"store"}`, true); err != nil {
-		return fmt.Errorf("failed to register store app: %w", err)
+		return upstreamf(err, "failed to register store app")
 	}
 	return nil
+}
+
+func isAppRegistryDisabledError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "apps.v1 group is disabled")
 }
 
 func (s *WalletStoreService) catalogItem(id string) *StoreCatalogItem {

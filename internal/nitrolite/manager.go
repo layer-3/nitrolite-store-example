@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/layer-3/nitrolite-go-example/internal/config"
-	appsigning "github.com/layer-3/nitrolite-go-example/internal/signing"
+	"github.com/layer-3/nitrolite-store-example/internal/config"
+	appsigning "github.com/layer-3/nitrolite-store-example/internal/signing"
 	"github.com/layer-3/nitrolite/pkg/app"
 	"github.com/layer-3/nitrolite/pkg/core"
 	sdk "github.com/layer-3/nitrolite/sdk/go"
@@ -58,6 +58,7 @@ type Client interface {
 	Withdraw(ctx context.Context, blockchainID uint64, asset string, amount decimal.Decimal) (*core.State, error)
 	Transfer(ctx context.Context, recipientWallet string, asset string, amount decimal.Decimal) (*core.State, error)
 	Checkpoint(ctx context.Context, asset string) (string, error)
+	GetOnChainBalance(ctx context.Context, chainID uint64, asset string, wallet string) (decimal.Decimal, error)
 }
 
 // Manager is a temporary lifecycle placeholder until the SDK wiring lands.

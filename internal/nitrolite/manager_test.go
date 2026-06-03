@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/layer-3/nitrolite-go-example/internal/testsupport"
+	"github.com/layer-3/nitrolite-store-example/internal/testsupport"
 )
 
 func TestManagerRunReconnectsAfterClientClosure(t *testing.T) {

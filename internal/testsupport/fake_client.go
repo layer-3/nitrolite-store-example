@@ -11,38 +11,39 @@ import (
 
 // FakeClient is a configurable test double for nitrolite.Client.
 type FakeClient struct {
-	CloseFunc                     func() error
-	GetUserAddressFunc            func() string
-	PingFunc                      func(context.Context) error
-	SetHomeBlockchainFunc         func(string, uint64) error
-	WaitChFunc                    func() <-chan struct{}
-	GetConfigFunc                 func(context.Context) (*core.NodeConfig, error)
-	GetBlockchainsFunc            func(context.Context) ([]core.Blockchain, error)
-	GetAssetsFunc                 func(context.Context, *uint64) ([]core.Asset, error)
-	GetBalancesFunc               func(context.Context, string) ([]core.BalanceEntry, error)
-	GetTransactionsFunc           func(context.Context, string, *sdk.GetTransactionsOptions) ([]core.Transaction, core.PaginationMetadata, error)
-	GetHomeChannelFunc            func(context.Context, string, string) (*core.Channel, error)
-	GetLatestStateFunc            func(context.Context, string, string, bool) (*core.State, error)
-	GetAppsFunc                   func(context.Context, *sdk.GetAppsOptions) ([]app.AppInfoV1, core.PaginationMetadata, error)
-	RegisterAppFunc               func(context.Context, string, string, bool) error
-	GetAppSessionsFunc            func(context.Context, *sdk.GetAppSessionsOptions) ([]app.AppSessionInfoV1, core.PaginationMetadata, error)
-	GetAppDefinitionFunc          func(context.Context, string) (*app.AppDefinitionV1, error)
-	CreateAppSessionFunc          func(context.Context, app.AppDefinitionV1, string, []string, ...sdk.CreateAppSessionOptions) (string, string, string, error)
-	SubmitAppSessionDepositFunc   func(context.Context, app.AppStateUpdateV1, []string, string, decimal.Decimal) (string, error)
-	SubmitAppStateFunc            func(context.Context, app.AppStateUpdateV1, []string) error
-	SubmitAppSessionKeyStateFunc  func(context.Context, app.AppSessionKeyStateV1) error
-	GetLastAppKeyStatesFunc       func(context.Context, string, *sdk.GetLastKeyStatesOptions) ([]app.AppSessionKeyStateV1, error)
-	SignSessionKeyStateFunc       func(app.AppSessionKeyStateV1) (string, error)
+	CloseFunc                        func() error
+	GetUserAddressFunc               func() string
+	PingFunc                         func(context.Context) error
+	SetHomeBlockchainFunc            func(string, uint64) error
+	WaitChFunc                       func() <-chan struct{}
+	GetConfigFunc                    func(context.Context) (*core.NodeConfig, error)
+	GetBlockchainsFunc               func(context.Context) ([]core.Blockchain, error)
+	GetAssetsFunc                    func(context.Context, *uint64) ([]core.Asset, error)
+	GetBalancesFunc                  func(context.Context, string) ([]core.BalanceEntry, error)
+	GetTransactionsFunc              func(context.Context, string, *sdk.GetTransactionsOptions) ([]core.Transaction, core.PaginationMetadata, error)
+	GetHomeChannelFunc               func(context.Context, string, string) (*core.Channel, error)
+	GetLatestStateFunc               func(context.Context, string, string, bool) (*core.State, error)
+	GetAppsFunc                      func(context.Context, *sdk.GetAppsOptions) ([]app.AppInfoV1, core.PaginationMetadata, error)
+	RegisterAppFunc                  func(context.Context, string, string, bool) error
+	GetAppSessionsFunc               func(context.Context, *sdk.GetAppSessionsOptions) ([]app.AppSessionInfoV1, core.PaginationMetadata, error)
+	GetAppDefinitionFunc             func(context.Context, string) (*app.AppDefinitionV1, error)
+	CreateAppSessionFunc             func(context.Context, app.AppDefinitionV1, string, []string, ...sdk.CreateAppSessionOptions) (string, string, string, error)
+	SubmitAppSessionDepositFunc      func(context.Context, app.AppStateUpdateV1, []string, string, decimal.Decimal) (string, error)
+	SubmitAppStateFunc               func(context.Context, app.AppStateUpdateV1, []string) error
+	SubmitAppSessionKeyStateFunc     func(context.Context, app.AppSessionKeyStateV1) error
+	GetLastAppKeyStatesFunc          func(context.Context, string, *sdk.GetLastKeyStatesOptions) ([]app.AppSessionKeyStateV1, error)
+	SignSessionKeyStateFunc          func(app.AppSessionKeyStateV1) (string, error)
 	SubmitChannelSessionKeyStateFunc func(context.Context, core.ChannelSessionKeyStateV1) error
-	GetLastChannelKeyStatesFunc   func(context.Context, string, *sdk.GetLastChannelKeyStatesOptions) ([]core.ChannelSessionKeyStateV1, error)
-	SignChannelSessionKeyStateFunc func(core.ChannelSessionKeyStateV1) (string, error)
-	CloseHomeChannelFunc          func(context.Context, string) (*core.State, error)
-	ChallengeFunc                 func(context.Context, core.State) (string, error)
-	ApproveTokenFunc              func(context.Context, uint64, string, decimal.Decimal) (string, error)
-	DepositFunc                   func(context.Context, uint64, string, decimal.Decimal) (*core.State, error)
-	WithdrawFunc                  func(context.Context, uint64, string, decimal.Decimal) (*core.State, error)
-	TransferFunc                  func(context.Context, string, string, decimal.Decimal) (*core.State, error)
-	CheckpointFunc                func(context.Context, string) (string, error)
+	GetLastChannelKeyStatesFunc      func(context.Context, string, *sdk.GetLastChannelKeyStatesOptions) ([]core.ChannelSessionKeyStateV1, error)
+	SignChannelSessionKeyStateFunc   func(core.ChannelSessionKeyStateV1) (string, error)
+	CloseHomeChannelFunc             func(context.Context, string) (*core.State, error)
+	ChallengeFunc                    func(context.Context, core.State) (string, error)
+	ApproveTokenFunc                 func(context.Context, uint64, string, decimal.Decimal) (string, error)
+	DepositFunc                      func(context.Context, uint64, string, decimal.Decimal) (*core.State, error)
+	WithdrawFunc                     func(context.Context, uint64, string, decimal.Decimal) (*core.State, error)
+	TransferFunc                     func(context.Context, string, string, decimal.Decimal) (*core.State, error)
+	CheckpointFunc                   func(context.Context, string) (string, error)
+	GetOnChainBalanceFunc            func(context.Context, uint64, string, string) (decimal.Decimal, error)
 }
 
 func (f *FakeClient) Close() error {
@@ -268,4 +269,11 @@ func (f *FakeClient) Checkpoint(ctx context.Context, asset string) (string, erro
 		return f.CheckpointFunc(ctx, asset)
 	}
 	return "", nil
+}
+
+func (f *FakeClient) GetOnChainBalance(ctx context.Context, chainID uint64, asset string, wallet string) (decimal.Decimal, error) {
+	if f.GetOnChainBalanceFunc != nil {
+		return f.GetOnChainBalanceFunc(ctx, chainID, asset, wallet)
+	}
+	return decimal.Zero, nil
 }

@@ -30,22 +30,6 @@ func submitAppStateRPC(ctx context.Context, wsURL string, req rpc.AppSessionsV1S
 	})
 }
 
-func submitDepositStateRPC(ctx context.Context, wsURL string, req rpc.AppSessionsV1SubmitDepositStateRequest) (string, error) {
-	var signature string
-	err := withRPCClient(ctx, wsURL, func(client *rpc.Client) error {
-		resp, err := client.AppSessionsV1SubmitDepositState(ctx, req)
-		if err != nil {
-			return err
-		}
-		signature = resp.StateNodeSig
-		return nil
-	})
-	if err != nil {
-		return "", err
-	}
-	return signature, nil
-}
-
 func withRPCClient(ctx context.Context, wsURL string, fn func(*rpc.Client) error) error {
 	dialer := rpc.NewWebsocketDialer(rpc.DefaultWebsocketDialerConfig)
 	client := rpc.NewClient(dialer)

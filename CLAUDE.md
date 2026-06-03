@@ -1,15 +1,18 @@
 # CLAUDE
 
 Module:
-- `github.com/layer-3/nitrolite-go-example`
+
+- `github.com/layer-3/nitrolite-store-example`
 
 Commands:
+
 ```bash
 go run ./cmd/server
-env CGO_ENABLED=0 GOCACHE=/tmp/nitrolite-go-example-gocache go test ./...
-docker build -t nitrolite-go-example .
+env CGO_ENABLED=0 GOCACHE=/tmp/nitrolite-store-example-gocache go test $(go list ./... | grep -v '/frontend/node_modules/')
+docker build -t nitrolite-store-example .
 go vet ./...
 gofmt -w .
+cd frontend && npm run lint && npm run typecheck && npm run build
 ```
 
 Key paths:
@@ -18,11 +21,19 @@ Key paths:
 - persistence: `internal/store`
 - api: `internal/httpapi`
 - services: `internal/service`
+- frontend source: `frontend`
 - web router: `internal/webui/handler.go`
-- web assets: `web`
+- embedded assets: `internal/webui/dist`
 
 Product surfaces:
 
-- `/`: App Session Micropayment Store
-- `/reference`: embedded API reference
-- `/advanced`: raw developer/debug console
+- `/`: content store
+- `/healthz`: process health
+- `/readyz`: Clearnode readiness
+
+Active API:
+
+- `GET /api/store/bootstrap`
+- `POST /api/store/init`
+- `POST /api/store/update`
+- `GET /api/store/content/{id}`

@@ -1,83 +1,118 @@
 # API
 
-Primary reference surface: [`/reference`](http://localhost:8080/reference)
+The store API is intentionally small. App-session creation and state changes are wallet-signature driven; content reads use a public demo gate.
 
-Machine-readable spec: [`/openapi.json`](http://localhost:8080/openapi.json)
+## `GET /api/store/bootstrap`
 
-The OpenAPI document served by the Go backend is the source of truth for:
+Query:
 
-- route inventory
-- request/response examples
-- raw write-auth expectations
-- store session semantics
+- `wallet_address`
+- `asset`, optional, defaults to the configured default asset
 
-## Main route groups
+Returns store metadata, supported assets, available signed home-channel balance, channel readiness, catalog, current wallet session state, wallet-owned library items, and an optional pending deposit action.
 
-- Health / Wallet / Node
-- Store
-- Catalog
-- Content
-- Raw Channel
-- Raw Sessions
-- Raw Session Keys
-- Auth
-- Legacy
+`channel_readiness.status` is one of:
 
-## Store routes
+- `ready`: the selected asset has a signed home-channel state with positive user balance.
+- `ack_required`: Nitronode has off-chain funds that need wallet acknowledgement.
+- `deposit_required`: the wallet can prepare a channel from on-chain test tokens.
+- `funds_required`: no usable off-chain or on-chain funds were found for the selected asset.
+- `unavailable`: Nitronode or the configured chain RPC could not be checked.
 
-- `GET /api/v1/store/config`
-- `GET /api/v1/catalog`
-- `GET /api/v1/catalog/{id}`
-- `GET /api/v1/store/session?asset=...`
-- `POST /api/v1/store/session/create`
-- `POST /api/v1/app-session/submit-state`
-- `GET /api/v1/purchases`
-- `GET /api/v1/content/{id}`
-- `GET /api/v1/balance?asset=...`
+Supported demo assets are `yusd` and `yellow`. `yusd` is the default walkthrough asset; `yellow` is retained as a second testnet asset for the same app-session flows.
 
-## Store auth model
+## `POST /api/store/init`
 
-Reads are public.
+Creates the app session after the frontend signs the app definition.
 
-Store product routes use a browser-scoped cookie:
+Request fields:
 
-- `GET /api/v1/store/config` ensures the cookie exists
-- store sessions and purchases are isolated per browser cookie value
-- no wallet connect and no external login is required in v1
-
-Raw mutation routes in `/advanced` use `requireWriteAccess()`:
-
-- bearer key or unlocked write-session cookie
-
-Hidden developer-only capability:
-
-- `app_withdraw` still goes through `POST /api/v1/app-session/submit-state`
-- but the server only allows it when write access is present
-
-## Submit-state contract
-
-`POST /api/v1/app-session/submit-state` is the single store mutation endpoint.
-
-Required request fields:
-
-- `session_id`
+- `wallet_address`, optional consistency check
 - `asset`
+- `definition`
 - `session_data`
+- `user_signature`
 
-`session_data` is JSON encoded as a string and must describe the action:
+The backend verifies the shopper signature over `packCreateAppSessionRequestV1(definition, session_data)`, adds the store app signature, calls `sdkClient.CreateAppSession`, persists the session, and returns bootstrap data.
+
+## `POST /api/store/update`
+
+Handles user deposit, user withdraw, and purchase updates.
+
+Request fields:
+
+- `wallet_address`, optional consistency check
+- `asset`
+- `app_state_update`
+- `user_signature`
+
+The backend verifies the shopper signature over `packAppStateUpdateV1(app_state_update)` and dispatches by `app_state_update.intent`.
+
+Deposit returns:
+
+- `status: "signed"`
+- `intent: "user_deposit"`
+- `app_signature`
+- `pending_action`, containing the signed deposit payload needed for browser-side resume
+
+Withdraw and purchase return:
+
+- `status: "submitted"`
+- `intent`
+- `bootstrap`
+
+`app_state_update.intent` remains the Nitrolite protocol intent (`deposit`, `withdraw`, or `operate`). The nested `session_data.intent` is the store-level action (`user_deposit`, `user_withdraw`, or `purchase`).
+
+For deposits, the backend stores a checkpoint before returning the app signature. Bootstrap returns that checkpoint as `pending_action` until Nitronode reflects the submitted app session version, so the frontend can resume after reload without asking MetaMask to sign again.
+
+## `GET /api/store/content/{id}`
+
+Opens purchased content for a wallet and asset.
+
+Query:
+
+- `wallet_address`
+- `asset`, `yusd` or `yellow`
+
+The backend confirms the wallet session, reconciles pending purchases, and returns content only for a submitted purchase.
+
+This is intentionally a public example-app read path. It does not prove the caller controls `wallet_address`; production content APIs should use an authenticated read session, signed read proof, or equivalent authorization boundary.
+
+`POST /api/store/content/{id}/open` is disabled and returns `405`.
+
+## Errors
+
+Errors use:
 
 ```json
-{"action":"deposit","amount":"1.00"}
-{"action":"purchase","item_id":"article-micropayments","price":"0.50"}
-{"action":"user_withdraw","amount":"0.50"}
-{"action":"app_withdraw","amount":"0.50"}
+{"error":{"code":"stale_version","message":"app session version is stale"}}
 ```
 
-The server does not trust client business math:
+Important signed-flow codes:
 
-- purchase price is revalidated against the seeded catalog
-- duplicate purchase is rejected
-- user/app withdraw amounts are capped by current allocation
-- only one asset is allowed per store session
+- `invalid_signature`
+- `stale_version`
+- `insufficient_balance`
+- `duplicate_purchase`
+- `clearnode_unavailable`
+- `clearnode_operation_failed`
 
-Use this file as orientation only. For concrete request and response bodies, use the embedded reference.
+## Session Data
+
+Deposit:
+
+```json
+{"intent":"user_deposit","amount":"1.00"}
+```
+
+Withdraw:
+
+```json
+{"intent":"user_withdraw"}
+```
+
+Purchase:
+
+```json
+{"intent":"purchase","item_id":1,"item_price":"0.9"}
+```

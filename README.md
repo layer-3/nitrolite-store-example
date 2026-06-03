@@ -1,44 +1,101 @@
-# nitrolite-go-example
+# nitrolite-store-example
 
-Go backend reference app for a Nitrolite-backed **content store** with a **TypeScript + MetaMask** frontend.
+Go backend and React frontend for a Nitrolite-backed content store using the Nitrolite v1 TypeScript SDK from the browser and the Go SDK from the server.
 
-One Go service serves the built frontend and the store API from the same origin. The shopper experience is intentionally small:
+The shopper flow is intentionally narrow:
 
-- connect MetaMask
-- add funds
-- buy content
-- read purchased content
-- withdraw remaining balance
+1. Connect MetaMask.
+2. Prepare the selected asset home channel when the wallet is not ready yet.
+3. Create a two-party app session between the shopper wallet and store app signer.
+4. Deposit YUSD into the store session.
+5. Purchase content.
+6. Read purchased content.
+7. Withdraw remaining store balance.
 
-Protocol details stay behind the implementation boundary. The main UI does not expose raw Nitrolite or channel-management surfaces.
+`YUSD` is the default walkthrough asset. `YELLOW` is also exposed as a second testnet asset so the same wallet/session flows can be exercised against another configured asset before mainnet asset names are finalized.
 
 ## Surfaces
 
-- `/` shopper-facing store UI
-- `/healthz` process health
-- `/readyz` Clearnode readiness
+- `/`: store UI
+- `/healthz`: process health
+- `/readyz`: Nitronode readiness
+- `GET /api/store/bootstrap`
+- `POST /api/store/init`
+- `POST /api/store/update`
+- `GET /api/store/content/{id}`
 
-## What This Demonstrates
+## Trust Model
 
-- a Go backend that validates, app-signs, and submits frontend-constructed app-session updates
-- a React + Vite frontend that uses MetaMask as the real shopper identity
-- automatic app-session bootstrap after wallet connect
-- exact-payload forwarding: the update the user signs is the update the backend submits
-- instant content gating after successful purchase
-- YUSD and YELLOW catalog pricing from one seeded catalog
+- MetaMask is the shopper identity.
+- The frontend constructs the app session definition and app state updates.
+- The shopper signs with MetaMask using direct `@yellow-org/sdk` v1 packers.
+- The backend verifies the exact signed payload before adding the store app signature.
+- The backend never signs as the shopper.
+- Store authorization is based on app-session signatures, not login cookies.
+- Deposit checkpoints store the signed deposit payload long enough to resume a browser-side Nitronode submit after reload or timeout.
+- This is not a production-ready authorization model: content reads use a public example-app gate keyed by wallet, item, and submitted purchase status, so production apps should add an authenticated read session, signed read proof, or equivalent boundary before serving confidential content.
 
-## Trust model
+## Required Flows
 
-This refresh is wallet-first.
+### App Session Creation
 
-- MetaMask is the shopper identity
-- the frontend constructs the full app-session update
-- the shopper signs the update in MetaMask
-- the backend validates the same payload, app-signs it, and submits it
-- the backend does **not** sign as the user
-- channel management is assumed to exist already and is out of scope for this app
+1. User presses `Connect`.
+2. Frontend requests MetaMask accounts.
+3. Frontend calls `GET /api/store/bootstrap?wallet_address=...&asset=yusd`.
+4. If `channel_readiness.status` is not `ready`, the frontend asks the user to prepare the channel first.
+5. For `ack_required`, the browser SDK acknowledges the pending off-chain state and checkpoints when needed.
+6. For `deposit_required`, the browser SDK deposits the configured bootstrap amount from on-chain test tokens and checkpoints.
+7. Frontend constructs `AppDefinitionV1` with shopper and app signer participants, both weight `1`, quorum `2`, and `nonce: BigInt(Date.now() * 1000000)`.
+8. Frontend encodes with `packCreateAppSessionRequestV1`.
+9. MetaMask signs the encoded payload.
+10. Frontend calls `POST /api/store/init`.
+11. Backend verifies the definition and shopper signature.
+12. Backend app-signs and calls `sdkClient.CreateAppSession`.
+13. Frontend receives success and shows the session as ready.
 
-Session keys are intentionally deferred to a later phase.
+### Deposit
+
+1. User enters a YUSD amount and presses `Deposit`.
+2. Frontend uses cached bootstrap data or refreshes `GET /api/store/bootstrap`.
+3. Frontend constructs `AppStateUpdateV1` with `AppStateUpdateIntent.Deposit`.
+4. `sessionData` is `{"intent":"user_deposit","amount":"..."}`.
+5. Frontend encodes with `packAppStateUpdateV1`.
+6. MetaMask signs the encoded payload.
+7. Frontend calls `POST /api/store/update`.
+8. Backend verifies the update, signature, version, participants, asset, and allocation delta.
+9. Backend persists a signed deposit checkpoint and returns the store app signature.
+10. Frontend submits to Nitronode with `submitAppSessionDeposit`.
+11. Frontend refreshes bootstrap and shows the updated store balance.
+
+If the browser is closed or the Nitronode submit times out after step 9, bootstrap returns `pending_action` for the signed deposit. The frontend shows `Resume`, which reuses the stored signatures and does not ask MetaMask to sign again.
+
+### Withdraw
+
+1. User enters a YUSD amount and presses `Withdraw`.
+2. Frontend constructs `AppStateUpdateV1` with `AppStateUpdateIntent.Withdraw`.
+3. `sessionData` is `{"intent":"user_withdraw"}`.
+4. Frontend signs with MetaMask and calls `POST /api/store/update`.
+5. Backend verifies, app-signs, submits with `sdkClient.SubmitAppState`, and returns refreshed bootstrap data.
+
+`submitAppSessionDeposit` is deposit-specific. Withdraw follows the backend `SubmitAppState` path.
+
+### Purchase
+
+1. User chooses item `1` and presses `Purchase`.
+2. Frontend constructs `AppStateUpdateV1` with `AppStateUpdateIntent.Operate`.
+3. The YUSD example payload is `{"intent":"purchase","item_id":1,"item_price":"0.9"}`.
+4. Frontend signs with MetaMask and calls `POST /api/store/update`.
+5. Backend verifies item ownership, catalog price, allocation delta, signature, and session version.
+6. Backend app-signs, submits with `sdkClient.SubmitAppState`, records ownership, and returns refreshed bootstrap data.
+
+Purchase uses backend `SubmitAppState` because it is not a deposit operation.
+
+### Open Purchased Content
+
+1. User chooses an owned library item and presses `Open`.
+2. Frontend calls `GET /api/store/content/{id}?wallet_address=...&asset=...`.
+3. Backend checks the wallet session, asset, item id, and submitted purchase before returning content.
+4. This read path is intentionally public for demo ergonomics and should not be used as-is for confidential production content.
 
 ## Quickstart
 
@@ -49,181 +106,59 @@ go run ./cmd/server
 
 Open [http://localhost:8080/](http://localhost:8080/).
 
-If you were previously running an older build of this app, stop that server first. Web assets are embedded into the Go binary, so an older process will keep serving stale UI until restarted.
-
-## How To Use The Store
-
-The main product surface is `/`.
-
-Normal flow:
-
-1. Open `/`
-2. Connect MetaMask on Sepolia
-3. Wait for the store session to bootstrap automatically
-4. Add funds to the store balance
-5. Buy an item from the catalog
-6. Open it from `Library`
-7. Withdraw any remaining balance
-
-The main panels mean:
-
-- `Wallet` shows the connected shopper identity
-- `Available balance` is what can still be committed into the store
-- `Store balance` is the shopper allocation already inside the store session
-- `Catalog` lists seeded content and prices for the selected asset
-- `Library` shows wallet-owned content
-- `Reader` displays purchased content after ownership is confirmed
-- `Browser activity` is a client-side trace for debugging
-
-## Frontend development
-
-The product UI now lives in `frontend/` and is built with React + Vite + TypeScript.
-
-Development shape:
-
-- run the Go API separately
-- run Vite in `frontend/`
-- proxy `/api/*` to the Go server
-
-Production shape:
-
-- build the frontend into `internal/webui/dist`
-- run the Go server
-- the Go server serves the built frontend and API from the same origin
-
-## Railway deployment
-
-The recommended production-like deployment for this repo is a single Railway service backed by the included `Dockerfile`.
-
-Expected Railway shape:
-
-- one web service for the whole app
-- repo-linked to `main`
-- one attached volume mounted at `/app/data`
-- `SQLITE_PATH=/app/data/nitrolite-go-example.db`
-
-Recommended first-time flow:
-
-1. Link the repo to the target project:
+## Frontend Development
 
 ```bash
-railway link --workspace <your-workspace> --project <your-project>
+cd frontend
+npm ci
+npm run dev
 ```
 
-2. Add or link the service that will run this repo.
-3. Add a volume and mount it at `/app/data`.
-4. Set the required variables on the service.
-5. Deploy from the repo or run `railway up` from the repo root.
+The Vite dev server proxies `/api/*` to the Go server. Production assets build into `internal/webui/dist`.
 
-If you are deploying inside the Yellow org, use the appropriate internal workspace/project instead of the placeholders above.
-
-Useful Railway CLI commands:
-
-```bash
-railway volume add --mount-path /app/data
-railway variable set CLEARNODE_WS_URL=... DEMO_PRIVATE_KEY=... CONSOLE_API_KEY=... BLOCKCHAIN_RPC_URLS='{"11155111":"https://..."}' HOME_BLOCKCHAINS='{"yusd":11155111,"yellow":11155111}' SQLITE_PATH=/app/data/nitrolite-go-example.db STORE_NAME="Nitrolite App Session Store" STORE_APP_ID=default
-railway up --service <service-name>
-railway service status --service <service-name>
-```
-
-If Railway cannot fetch the GitHub repo initially, the fallback is a first deploy from the local checkout with `railway up`, then converting the service to repo-linked afterward.
-
-## Required environment
+## Environment
 
 Required:
 
 - `CLEARNODE_WS_URL`
 - `DEMO_PRIVATE_KEY`
-- `CONSOLE_API_KEY`
 - `BLOCKCHAIN_RPC_URLS`
 - `HOME_BLOCKCHAINS`
 
-Optional with defaults:
+Optional:
 
-- `PORT=8080` locally; Railway injects `PORT` automatically
+- `PORT=8080`
 - `LOG_LEVEL=info`
-- `SQLITE_PATH=./data/nitrolite-go-example.db`
+- `SQLITE_PATH=./data/nitrolite-store-example.db`
 - `STORE_NAME=Nitrolite App Session Store`
 - `STORE_APP_ID=default`
-- `STORE_APP_PRIVATE_KEY=` to override the derived store-app signer
+- `STORE_APP_PRIVATE_KEY=`
+- `STORE_CHANNEL_BOOTSTRAP_AMOUNTS={"yusd":"10","yellow":"10"}`
 
-Runtime assumptions:
+## Local Data
 
-- the demo signer wallet must already have sandbox funds
-- for a shared deployment, the signer should be a team-owned funded sandbox key
-- the configured home-channel assets must exist on the node
-- the RPC URLs must support the configured home chains
-- `/healthz` reports process health even while the SDK is reconnecting; `/readyz` stays `503` until the Clearnode connection is live
+SQLite stores wallet app sessions and purchases.
 
-## API shape
+Default local path:
 
-Public store routes:
+- `./data/nitrolite-store-example.db`
 
-- `POST /api/store/connect/challenge`
-- `POST /api/store/connect/verify`
-- `GET /api/store/bootstrap?asset=...`
-- `POST /api/store/update`
-- `GET /api/store/content/{id}?asset=...`
-- `GET /healthz`
-- `GET /readyz`
-
-The backend receives the full frontend-constructed update payload, validates it, app-signs it, and submits the same payload to Clearnode.
-
-## Persistence
-
-SQLite stores:
-
-- browser-scoped store sessions
-- purchases
-- legacy unused tables that are no longer part of the active product path
-
-Default path:
-
-- `./data/nitrolite-go-example.db`
-
-Recommended Railway path:
-
-- `/app/data/nitrolite-go-example.db`
-
-If you are switching from an older build, delete the old local DB first if you want a clean store state:
+Reset local store state:
 
 ```bash
-rm -f ./data/nitrolite-go-example.db
+rm -f ./data/nitrolite-store-example.db
 ```
 
-## Running tests
-
-Standard:
+## Verification
 
 ```bash
-go test ./...
+go test $(go list ./... | grep -v '/frontend/node_modules/')
+go vet ./...
+cd frontend
+npm ci
+npm run lint
+npm run typecheck
+npm run build
+cd ..
+docker build -t nitrolite-store-example .
 ```
-
-If your machine blocks cgo builds because of the local Xcode license state, use:
-
-```bash
-CGO_ENABLED=0 GOCACHE=/tmp/nitrolite-go-example-gocache go test ./...
-```
-
-## Troubleshooting
-
-If you still see an older UI or the old “Go SDK guided demo” UI:
-
-- stop the existing process on `:8080`
-- restart with `go run ./cmd/server`
-- hard refresh the browser
-
-If store actions fail:
-
-- check `/healthz`
-- confirm the demo wallet has balance in the selected asset
-- on Railway, confirm the volume is attached and `SQLITE_PATH` points at `/app/data/nitrolite-go-example.db`
-- inspect `/advanced` for raw SDK state
-- use `/reference` to inspect the live request/response shapes
-
-## Where to look
-
-- [`AGENTS.md`](./AGENTS.md)
-- [`CLAUDE.md`](./CLAUDE.md)
-- [`docs/api.md`](./docs/api.md)
-- [`docs/architecture.md`](./docs/architecture.md)

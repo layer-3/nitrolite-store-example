@@ -1,24 +1,26 @@
 # API Contract Rules
 
-- prefix all API routes with `/api/v1`
+- active API routes are only:
+  - `GET /api/store/bootstrap`
+  - `POST /api/store/init`
+  - `POST /api/store/update`
+  - `GET /api/store/content/{id}`
 - amounts are decimal strings, never floats
 - error envelope:
 ```json
 {"error":{"code":"snake_case","message":"lowercase message"}}
 ```
-- raw mutation routes in `/advanced` use `requireWriteAccess()`
-- `requireWriteAccess()` accepts:
-  - bearer key
-  - unlocked write-session cookie
-- store product routes are browser-cookie scoped and do not require write unlock for normal use
-- `POST /api/v1/app-session/submit-state` is the single store mutation endpoint
-- `POST /api/v1/app-session/submit-state` must dispatch from `session_data.action`
+- store state-changing routes are wallet-signature scoped
+- `POST /api/store/init` verifies `packCreateAppSessionRequestV1(definition, session_data)`
+- `POST /api/store/update` verifies `packAppStateUpdateV1(app_state_update)`
+- `POST /api/store/update` dispatches from `app_state_update.intent`
+- deposit responses are app-signed checkpoints; bootstrap may return `pending_action` until the browser-side Clearnode submit is observed
+- `GET /api/store/content/{id}` is a public demo read path and must still require a submitted wallet purchase
+- do not present the content read gate as production-grade authorization
 - supported public actions are:
-  - `deposit`
+  - `user_deposit`
   - `purchase`
   - `user_withdraw`
-- hidden developer-only action:
-  - `app_withdraw`
-  - only allowed when write access is present
 - server must never trust client purchase price or allocation math
-- one browser-scoped store session per asset
+- supported demo assets are `yusd` and `yellow`
+- one wallet-scoped store session per supported asset

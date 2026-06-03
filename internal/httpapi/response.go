@@ -5,7 +5,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/layer-3/nitrolite-go-example/internal/service"
+	"github.com/layer-3/nitrolite-store-example/internal/service"
 )
 
 type errorEnvelope struct {
@@ -35,24 +35,30 @@ func writeError(w http.ResponseWriter, status int, code string, message string) 
 func writeServiceError(w http.ResponseWriter, err error) {
 	var validationErr service.ValidationError
 	if errors.As(err, &validationErr) {
-		writeError(w, http.StatusBadRequest, "invalid_request", validationErr.Error())
+		writeError(w, http.StatusBadRequest, validationErr.Code(), validationErr.Error())
 		return
 	}
 
 	var notFoundErr service.NotFoundError
 	if errors.As(err, &notFoundErr) {
-		writeError(w, http.StatusUnprocessableEntity, "not_found", notFoundErr.Error())
+		writeError(w, http.StatusUnprocessableEntity, notFoundErr.Code(), notFoundErr.Error())
 		return
 	}
 
 	var conflictErr service.ConflictError
 	if errors.As(err, &conflictErr) {
-		writeError(w, http.StatusConflict, "conflict", conflictErr.Error())
+		writeError(w, http.StatusConflict, conflictErr.Code(), conflictErr.Error())
+		return
+	}
+
+	var upstreamErr service.UpstreamError
+	if errors.As(err, &upstreamErr) {
+		writeError(w, http.StatusBadGateway, "nitronode_operation_failed", upstreamErr.Error())
 		return
 	}
 
 	if errors.Is(err, service.ErrUnavailable) {
-		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "clearnode not reachable")
+		writeError(w, http.StatusServiceUnavailable, "nitronode_unavailable", service.ErrUnavailable.Error())
 		return
 	}
 	writeError(w, http.StatusUnprocessableEntity, "sdk_operation_failed", err.Error())
